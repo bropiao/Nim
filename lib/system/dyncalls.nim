@@ -17,7 +17,7 @@
 const
   NilLibHandle: LibHandle = nil
 
-proc rawWrite(f: File, s: string) = 
+proc rawWrite(f: File, s: string) =
   # we cannot throw an exception here!
   discard writeBuffer(f, cstring(s), s.len)
 
@@ -68,7 +68,10 @@ when defined(posix):
 
   proc nimLoadLibrary(path: string): LibHandle =
     result = dlopen(path, RTLD_NOW)
-    #c_fprintf(c_stdout, "%s\n", dlerror())
+    when defined(nimDebugDlOpen):
+      let error = dlerror()
+      if error != nil:
+        c_fprintf(c_stdout, "%s\n", error)
 
   proc nimGetProcAddr(lib: LibHandle, name: cstring): ProcAddr =
     result = dlsym(lib, name)
@@ -105,46 +108,14 @@ elif defined(windows) or defined(dos):
 
   proc nimGetProcAddr(lib: LibHandle, name: cstring): ProcAddr =
     result = getProcAddress(cast[THINSTANCE](lib), name)
-    if result == nil: procAddrError(name)
-
-elif defined(mac):
-  #
-  # =======================================================================
-  # Native Mac OS X / Darwin Implementation
-  # =======================================================================
-  #
-  {.error: "no implementation for dyncalls yet".}
-
-  proc nimUnloadLibrary(lib: LibHandle) =
-    NSUnLinkModule(NSModule(lib), NSUNLINKMODULE_OPTION_RESET_LAZY_REFERENCES)
-
-  var
-    dyld_present {.importc: "_dyld_present", header: "<dyld.h>".}: int
-
-  proc nimLoadLibrary(path: string): LibHandle =
-    var
-      img: NSObjectFileImage
-      ret: NSObjectFileImageReturnCode
-      modul: NSModule
-    # this would be a rare case, but prevents crashing if it happens
-    result = nil
-    if dyld_present != 0:
-      ret = NSCreateObjectFileImageFromFile(path, addr(img))
-      if ret == NSObjectFileImageSuccess:
-        modul = NSLinkModule(img, path, NSLINKMODULE_OPTION_PRIVATE or
-                                        NSLINKMODULE_OPTION_RETURN_ON_ERROR)
-        NSDestroyObjectFileImage(img)
-        result = LibHandle(modul)
-
-  proc nimGetProcAddr(lib: LibHandle, name: cstring): ProcAddr =
-    var
-      nss: NSSymbol
-    nss = NSLookupSymbolInModule(NSModule(lib), name)
-    result = ProcAddr(NSAddressOfSymbol(nss))
-    if result == nil: ProcAddrError(name)
+    if result != nil: return
+    for i in countup(0, 50):
+      var decorated = "_" & $name & "@" & $(i * 4)
+      result = getProcAddress(cast[THINSTANCE](lib), cstring(decorated))
+      if result != nil: return
+    procAddrError(name)
 
 else:
   {.error: "no implementation for dyncalls".}
-  
-{.pop.}
 
+{.pop.}

@@ -291,12 +291,14 @@ const
   sfNoForward* = sfRegister
     # forward declarations are not required (per module)
 
-  sfNoRoot* = sfBorrow # a local variable is provably no root so it doesn't
-                       # require RC ops
   sfCompileToCpp* = sfInfixCall       # compile the module as C++ code
   sfCompileToObjc* = sfNamedParamCall # compile the module as Objective-C code
   sfExperimental* = sfOverriden       # module uses the .experimental switch
   sfGoto* = sfOverriden               # var is used for 'goto' code generation
+  sfWrittenTo* = sfBorrow             # param is assigned to
+  sfEscapes* = sfProcvar              # param escapes
+  sfBase* = sfDiscriminant
+  sfIsSelf* = sfOverriden             # param is 'self'
 
 const
   # getting ready for the future expr/stmt merge
@@ -457,11 +459,11 @@ type
     tfByCopy,         # pass object/tuple by copy (C backend)
     tfByRef,          # pass object/tuple by reference (C backend)
     tfIterator,       # type is really an iterator, not a tyProc
-    tfShared,         # type is 'shared'
+    tfPartial,        # type is declared as 'partial'
     tfNotNil,         # type cannot be 'nil'
 
     tfNeedsInit,      # type constains a "not nil" constraint somewhere or some
-                      # other type so that it requires initalization
+                      # other type so that it requires initialization
     tfVarIsPtr,       # 'var' type is translated like 'ptr' even in C++ mode
     tfHasMeta,        # type contains "wildcard" sub-types such as generic params
                       # or other type classes
@@ -476,6 +478,8 @@ type
                       # wildcard type.
     tfHasAsgn         # type has overloaded assignment operator
     tfBorrowDot       # distinct type borrows '.'
+    tfTriggersCompileTime # uses the NimNode type which make the proc
+                          # implicitly '.compiletime'
 
   TTypeFlags* = set[TTypeFlag]
 
@@ -497,8 +501,7 @@ type
     skResult,             # special 'result' variable
     skProc,               # a proc
     skMethod,             # a method
-    skIterator,           # an inline iterator
-    skClosureIterator,    # a resumable closure iterator
+    skIterator,           # an iterator
     skConverter,          # a type converter
     skMacro,              # a macro
     skTemplate,           # a template; currently also misused for user-defined
@@ -515,54 +518,73 @@ type
   TSymKinds* = set[TSymKind]
 
 const
-  routineKinds* = {skProc, skMethod, skIterator, skClosureIterator,
+  routineKinds* = {skProc, skMethod, skIterator,
                    skConverter, skMacro, skTemplate}
   tfIncompleteStruct* = tfVarargs
   tfUncheckedArray* = tfVarargs
   tfUnion* = tfNoSideEffect
   tfGcSafe* = tfThread
   tfObjHasKids* = tfEnumHasHoles
+  tfOldSchoolExprStmt* = tfVarargs # for now used to distinguish \
+    # 'varargs[expr]' from 'varargs[untyped]'. Eventually 'expr' will be
+    # deprecated and this mess can be cleaned up.
+  tfVoid* = tfVarargs # for historical reasons we conflated 'void' with
+                      # 'empty' ('@[]' has the type 'seq[empty]').
+  tfReturnsNew* = tfInheritable
   skError* = skUnknown
 
   # type flags that are essential for type equality:
-  eqTypeFlags* = {tfIterator, tfShared, tfNotNil, tfVarIsPtr}
+  eqTypeFlags* = {tfIterator, tfNotNil, tfVarIsPtr}
 
 type
   TMagic* = enum # symbols that require compiler magic:
     mNone,
-    mDefined, mDefinedInScope, mCompiles,
+    mDefined, mDefinedInScope, mCompiles, mArrGet, mArrPut, mAsgn,
     mLow, mHigh, mSizeOf, mTypeTrait, mIs, mOf, mAddr, mTypeOf, mRoof, mPlugin,
     mEcho, mShallowCopy, mSlurp, mStaticExec,
     mParseExprToAst, mParseStmtToAst, mExpandToAst, mQuoteAst,
-    mUnaryLt, mInc, mDec, mOrd, mNew, mNewFinalize, mNewSeq, mLengthOpenArray,
-    mLengthStr, mLengthArray, mLengthSeq, mXLenStr, mXLenSeq,
+    mUnaryLt, mInc, mDec, mOrd,
+    mNew, mNewFinalize, mNewSeq,
+    mLengthOpenArray, mLengthStr, mLengthArray, mLengthSeq,
+    mXLenStr, mXLenSeq,
     mIncl, mExcl, mCard, mChr,
     mGCref, mGCunref,
-
     mAddI, mSubI, mMulI, mDivI, mModI,
     mSucc, mPred,
     mAddF64, mSubF64, mMulF64, mDivF64,
-
-    mShrI, mShlI, mBitandI, mBitorI, mBitxorI, mMinI, mMaxI,
-    mMinF64, mMaxF64, mAddU, mSubU, mMulU,
-    mDivU, mModU, mEqI, mLeI,
-    mLtI,
+    mShrI, mShlI, mBitandI, mBitorI, mBitxorI,
+    mMinI, mMaxI,
+    mMinF64, mMaxF64,
+    mAddU, mSubU, mMulU, mDivU, mModU,
+    mEqI, mLeI, mLtI,
     mEqF64, mLeF64, mLtF64,
-    mLeU, mLtU, mLeU64, mLtU64,
-    mEqEnum, mLeEnum, mLtEnum, mEqCh, mLeCh, mLtCh, mEqB, mLeB, mLtB, mEqRef,
-    mEqUntracedRef, mLePtr, mLtPtr, mEqCString, mXor, mEqProc, mUnaryMinusI,
-    mUnaryMinusI64, mAbsI, mNot,
+    mLeU, mLtU,
+    mLeU64, mLtU64,
+    mEqEnum, mLeEnum, mLtEnum,
+    mEqCh, mLeCh, mLtCh,
+    mEqB, mLeB, mLtB,
+    mEqRef, mEqUntracedRef, mLePtr, mLtPtr, mEqCString,
+    mXor, mEqProc,
+    mUnaryMinusI, mUnaryMinusI64, mAbsI, mNot,
     mUnaryPlusI, mBitnotI,
-    mUnaryPlusF64, mUnaryMinusF64, mAbsF64, mZe8ToI, mZe8ToI64,
-    mZe16ToI, mZe16ToI64, mZe32ToI64, mZeIToI64, mToU8, mToU16, mToU32,
-    mToFloat, mToBiggestFloat, mToInt, mToBiggestInt, mCharToStr, mBoolToStr,
-    mIntToStr, mInt64ToStr, mFloatToStr, mCStrToStr, mStrToStr, mEnumToStr,
-    mAnd, mOr, mEqStr, mLeStr, mLtStr, mEqSet, mLeSet, mLtSet, mMulSet,
-    mPlusSet, mMinusSet, mSymDiffSet, mConStrStr, mSlice,
+    mUnaryPlusF64, mUnaryMinusF64, mAbsF64,
+    mZe8ToI, mZe8ToI64,
+    mZe16ToI, mZe16ToI64,
+    mZe32ToI64, mZeIToI64,
+    mToU8, mToU16, mToU32,
+    mToFloat, mToBiggestFloat,
+    mToInt, mToBiggestInt,
+    mCharToStr, mBoolToStr, mIntToStr, mInt64ToStr, mFloatToStr, mCStrToStr,
+    mStrToStr, mEnumToStr,
+    mAnd, mOr,
+    mEqStr, mLeStr, mLtStr,
+    mEqSet, mLeSet, mLtSet, mMulSet, mPlusSet, mMinusSet, mSymDiffSet,
+    mConStrStr, mSlice,
     mDotDot, # this one is only necessary to give nice compile time warnings
     mFields, mFieldPairs, mOmpParFor,
     mAppendStrCh, mAppendStrStr, mAppendSeqElem,
-    mInRange, mInSet, mRepr, mExit, mSetLengthStr, mSetLengthSeq,
+    mInRange, mInSet, mRepr, mExit,
+    mSetLengthStr, mSetLengthSeq,
     mIsPartOf, mAstToStr, mParallel,
     mSwap, mIsNil, mArrToSeq, mCopyStr, mCopyStrLast,
     mNewString, mNewStringOfCap, mParseBiggestFloat,
@@ -584,41 +606,53 @@ type
     mNSetFloatVal, mNSetSymbol, mNSetIdent, mNSetType, mNSetStrVal, mNLineInfo,
     mNNewNimNode, mNCopyNimNode, mNCopyNimTree, mStrToIdent, mIdentToStr,
     mNBindSym, mLocals, mNCallSite,
-    mEqIdent, mEqNimrodNode, mNHint, mNWarning, mNError,
-    mInstantiationInfo, mGetTypeInfo, mNGenSym
+    mEqIdent, mEqNimrodNode, mSameNodeType, mGetImpl,
+    mNHint, mNWarning, mNError,
+    mInstantiationInfo, mGetTypeInfo, mNGenSym,
+    mNimvm
 
 # things that we can evaluate safely at compile time, even if not asked for it:
 const
   ctfeWhitelist* = {mNone, mUnaryLt, mSucc,
     mPred, mInc, mDec, mOrd, mLengthOpenArray,
     mLengthStr, mLengthArray, mLengthSeq, mXLenStr, mXLenSeq,
+    mArrGet, mArrPut, mAsgn,
     mIncl, mExcl, mCard, mChr,
     mAddI, mSubI, mMulI, mDivI, mModI,
     mAddF64, mSubF64, mMulF64, mDivF64,
-    mShrI, mShlI, mBitandI, mBitorI, mBitxorI, mMinI, mMaxI,
-    mMinF64, mMaxF64, mAddU, mSubU, mMulU,
-    mDivU, mModU, mEqI, mLeI,
-    mLtI,
+    mShrI, mShlI, mBitandI, mBitorI, mBitxorI,
+    mMinI, mMaxI,
+    mMinF64, mMaxF64,
+    mAddU, mSubU, mMulU, mDivU, mModU,
+    mEqI, mLeI, mLtI,
     mEqF64, mLeF64, mLtF64,
-    mLeU, mLtU, mLeU64, mLtU64,
-    mEqEnum, mLeEnum, mLtEnum, mEqCh, mLeCh, mLtCh, mEqB, mLeB, mLtB, mEqRef,
-    mEqProc, mEqUntracedRef, mLePtr, mLtPtr, mEqCString, mXor, mUnaryMinusI,
-    mUnaryMinusI64, mAbsI, mNot,
-    mUnaryPlusI, mBitnotI,
-    mUnaryPlusF64, mUnaryMinusF64, mAbsF64, mZe8ToI, mZe8ToI64,
-    mZe16ToI, mZe16ToI64, mZe32ToI64, mZeIToI64, mToU8, mToU16, mToU32,
-    mToFloat, mToBiggestFloat, mToInt, mToBiggestInt, mCharToStr, mBoolToStr,
-    mIntToStr, mInt64ToStr, mFloatToStr, mCStrToStr, mStrToStr, mEnumToStr,
-    mAnd, mOr, mEqStr, mLeStr, mLtStr, mEqSet, mLeSet, mLtSet, mMulSet,
-    mPlusSet, mMinusSet, mSymDiffSet, mConStrStr,
-    mAppendStrCh, mAppendStrStr, mAppendSeqElem,
+    mLeU, mLtU,
+    mLeU64, mLtU64,
+    mEqEnum, mLeEnum, mLtEnum,
+    mEqCh, mLeCh, mLtCh,
+    mEqB, mLeB, mLtB,
+    mEqRef, mEqProc, mEqUntracedRef, mLePtr, mLtPtr, mEqCString, mXor,
+    mUnaryMinusI, mUnaryMinusI64, mAbsI, mNot, mUnaryPlusI, mBitnotI,
+    mUnaryPlusF64, mUnaryMinusF64, mAbsF64,
+    mZe8ToI, mZe8ToI64,
+    mZe16ToI, mZe16ToI64,
+    mZe32ToI64, mZeIToI64,
+    mToU8, mToU16, mToU32,
+    mToFloat, mToBiggestFloat,
+    mToInt, mToBiggestInt,
+    mCharToStr, mBoolToStr, mIntToStr, mInt64ToStr, mFloatToStr, mCStrToStr,
+    mStrToStr, mEnumToStr,
+    mAnd, mOr,
+    mEqStr, mLeStr, mLtStr,
+    mEqSet, mLeSet, mLtSet, mMulSet, mPlusSet, mMinusSet, mSymDiffSet,
+    mConStrStr, mAppendStrCh, mAppendStrStr, mAppendSeqElem,
     mInRange, mInSet, mRepr,
     mCopyStr, mCopyStrLast}
   # magics that require special semantic checking and
   # thus cannot be overloaded (also documented in the spec!):
   SpecialSemMagics* = {
     mDefined, mDefinedInScope, mCompiles, mLow, mHigh, mSizeOf, mIs, mOf,
-    mEcho, mShallowCopy, mExpandToAst, mParallel, mSpawn, mAstToStr}
+    mShallowCopy, mExpandToAst, mParallel, mSpawn, mAstToStr}
 
 type
   PNode* = ref TNode
@@ -678,6 +712,7 @@ type
     lfSingleUse               # no location yet and will only be used once
   TStorageLoc* = enum
     OnUnknown,                # location is unknown (stack, heap or static)
+    OnStatic,                 # in a static section
     OnStack,                  # location is on hardware stack
     OnHeap                    # location is on heap or global
                               # (reference counting needed)
@@ -703,6 +738,8 @@ type
     name*: Rope
     path*: PNode              # can be a string literal!
 
+  CompilesId* = int ## id that is used for the caching logic within
+                    ## ``system.compiles``. See the seminst module.
   TInstantiation* = object
     sym*: PSym
     concreteTypes*: seq[PType]
@@ -710,13 +747,13 @@ type
                               # needed in caas mode for purging the cache
                               # XXX: it's possible to switch to a
                               # simple ref count here
+    compilesId*: CompilesId
 
   PInstantiation* = ref TInstantiation
 
   TScope* = object
     depthLevel*: int
     symbols*: TStrTable
-    usingSyms*: seq[PNode]
     parent*: PScope
 
   PScope* = ref TScope
@@ -746,6 +783,7 @@ type
       tab*: TStrTable         # interface table for modules
     of skLet, skVar, skField, skForVar:
       guard*: PSym
+      bitsize*: int
     else: nil
     magic*: TMagic
     typ*: PType
@@ -780,6 +818,8 @@ type
     constraint*: PNode        # additional constraints like 'lit|result'; also
                               # misused for the codegenDecl pragma in the hope
                               # it won't cause problems
+    when defined(nimsuggest):
+      allUsages*: seq[TLineInfo]
 
   TTypeSeq* = seq[PType]
   TLockLevel* = distinct int16
@@ -864,7 +904,7 @@ type
 # the poor naming choices in the standard library.
 
 const
-  OverloadableSyms* = {skProc, skMethod, skIterator, skClosureIterator,
+  OverloadableSyms* = {skProc, skMethod, skIterator,
     skConverter, skModule, skTemplate, skMacro}
 
   GenericTypes*: TTypeKinds = {tyGenericInvocation, tyGenericBody,
@@ -888,11 +928,11 @@ const
   NilableTypes*: TTypeKinds = {tyPointer, tyCString, tyRef, tyPtr, tySequence,
     tyProc, tyString, tyError}
   ExportableSymKinds* = {skVar, skConst, skProc, skMethod, skType,
-    skIterator, skClosureIterator,
+    skIterator,
     skMacro, skTemplate, skConverter, skEnumField, skLet, skStub, skAlias}
   PersistentNodeFlags*: TNodeFlags = {nfBase2, nfBase8, nfBase16,
                                       nfDotSetter, nfDotField,
-                                      nfIsRef, nfIsCursor}
+                                      nfIsRef, nfIsCursor, nfLL}
   namePos* = 0
   patternPos* = 1    # empty except for term rewriting macros
   genericParamsPos* = 2
@@ -917,10 +957,8 @@ const
   nkStrKinds* = {nkStrLit..nkTripleStrLit}
 
   skLocalVars* = {skVar, skLet, skForVar, skParam, skResult}
-  skProcKinds* = {skProc, skTemplate, skMacro, skIterator, skClosureIterator,
+  skProcKinds* = {skProc, skTemplate, skMacro, skIterator,
                   skMethod, skConverter}
-
-  skIterators* = {skIterator, skClosureIterator}
 
 var ggDebug* {.deprecated.}: bool ## convenience switch for trying out things
 
@@ -972,6 +1010,10 @@ proc newNode*(kind: TNodeKind): PNode =
       writeStackTrace()
     inc gNodeId
 
+proc newTree*(kind: TNodeKind; children: varargs[PNode]): PNode =
+  result = newNode(kind)
+  result.sons = @children
+
 proc newIntNode*(kind: TNodeKind, intVal: BiggestInt): PNode =
   result = newNode(kind)
   result.intVal = intVal
@@ -1002,7 +1044,8 @@ proc newSym*(symKind: TSymKind, name: PIdent, owner: PSym,
   result.id = getID()
   when debugIds:
     registerId(result)
-  #if result.id < 2000:
+  #if result.id == 93289:
+  #  writeStacktrace()
   #  MessageOut(name.s & " has id: " & toString(result.id))
 
 var emptyNode* = newNode(nkEmpty)
@@ -1346,6 +1389,9 @@ proc propagateToOwner*(owner, elem: PType) =
       o2.flags.incl tfHasAsgn
       owner.flags.incl tfHasAsgn
 
+  if tfTriggersCompileTime in elem.flags:
+    owner.flags.incl tfTriggersCompileTime
+
   if owner.kind notin {tyProc, tyGenericInst, tyGenericBody,
                        tyGenericInvocation, tyPtr}:
     let elemB = elem.skipTypes({tyGenericInst})
@@ -1486,6 +1532,9 @@ proc getFloat*(a: PNode): BiggestFloat =
 proc getStr*(a: PNode): string =
   case a.kind
   of nkStrLit..nkTripleStrLit: result = a.strVal
+  of nkNilLit:
+    # let's hope this fixes more problems than it creates:
+    result = nil
   else:
     internalError(a.info, "getStr")
     result = ""
@@ -1506,12 +1555,13 @@ proc isGenericRoutine*(s: PSym): bool =
   else: discard
 
 proc skipGenericOwner*(s: PSym): PSym =
-  internalAssert s.kind in skProcKinds
   ## Generic instantiations are owned by their originating generic
   ## symbol. This proc skips such owners and goes straight to the owner
   ## of the generic itself (the module or the enclosing proc).
-  result = if sfFromGeneric in s.flags: s.owner.owner
-           else: s.owner
+  result = if s.kind in skProcKinds and sfFromGeneric in s.flags:
+             s.owner.owner
+           else:
+             s.owner
 
 proc originatingModule*(s: PSym): PSym =
   result = s.owner
@@ -1543,6 +1593,14 @@ proc makeStmtList*(n: PNode): PNode =
     result = newNodeI(nkStmtList, n.info)
     result.add n
 
+proc skipStmtList*(n: PNode): PNode =
+  if n.kind in {nkStmtList, nkStmtListExpr}:
+    for i in 0 .. n.len-2:
+      if n[i].kind notin {nkEmpty, nkCommentStmt}: return n
+    result = n.lastSon
+  else:
+    result = n
+
 proc createMagic*(name: string, m: TMagic): PSym =
   result = newSym(skProc, getIdent(name), nil, unknownLineInfo())
   result.magic = m
@@ -1550,3 +1608,10 @@ proc createMagic*(name: string, m: TMagic): PSym =
 let
   opNot* = createMagic("not", mNot)
   opContains* = createMagic("contains", mInSet)
+
+when false:
+  proc containsNil*(n: PNode): bool =
+    # only for debugging
+    if n.isNil: return true
+    for i in 0 ..< n.safeLen:
+      if n[i].containsNil: return true

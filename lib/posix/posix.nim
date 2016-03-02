@@ -448,7 +448,7 @@ type
     sa_family*: TSa_Family         ## Address family.
     sa_data*: array [0..255, char] ## Socket address (variable-length data).
 
-  Tsockaddr_storage* {.importc: "struct sockaddr_storage",
+  Sockaddr_storage* {.importc: "struct sockaddr_storage",
                        header: "<sys/socket.h>",
                        pure, final.} = object ## struct sockaddr_storage
     ss_family*: TSa_Family ## Address family.
@@ -506,7 +506,7 @@ type
               header: "<netinet/in.h>".} = object ## struct in6_addr
     s6_addr*: array [0..15, char]
 
-  Tsockaddr_in6* {.importc: "struct sockaddr_in6", pure, final,
+  Sockaddr_in6* {.importc: "struct sockaddr_in6", pure, final,
                    header: "<netinet/in.h>".} = object ## struct sockaddr_in6
     sin6_family*: TSa_Family ## AF_INET6.
     sin6_port*: InPort      ## Port number.
@@ -581,6 +581,7 @@ type
 
 {.deprecated: [TSockaddr_in: Sockaddr_in, TAddrinfo: AddrInfo,
     TSockAddr: SockAddr, TSockLen: SockLen, TTimeval: Timeval,
+    Tsockaddr_storage: Sockaddr_storage, Tsockaddr_in6: Sockaddr_in6,
     Thostent: Hostent, TServent: Servent,
     TInAddr: InAddr, TIOVec: IOVec, TInPort: InPort, TInAddrT: InAddrT,
     TIn6Addr: In6Addr, TInAddrScalar: InAddrScalar, TProtoent: Protoent].}
@@ -1662,6 +1663,8 @@ var
 
   INET_ADDRSTRLEN* {.importc, header: "<netinet/in.h>".}: cint
     ## 16. Length of the string form for IP.
+  INET6_ADDRSTRLEN* {.importc, header: "<netinet/in.h>".}: cint
+    ## Length of the string form for IPv6.
 
   IPV6_JOIN_GROUP* {.importc, header: "<netinet/in.h>".}: cint
     ## Join a multicast group.
@@ -1807,7 +1810,7 @@ proc ntohs*(a1: int16): int16 {.importc, header: "<arpa/inet.h>".}
 proc inet_addr*(a1: cstring): InAddrT {.importc, header: "<arpa/inet.h>".}
 proc inet_ntoa*(a1: InAddr): cstring {.importc, header: "<arpa/inet.h>".}
 proc inet_ntop*(a1: cint, a2: pointer, a3: cstring, a4: int32): cstring {.
-  importc, header: "<arpa/inet.h>".}
+  importc:"(char *)$1", header: "<arpa/inet.h>".}
 proc inet_pton*(a1: cint, a2: cstring, a3: pointer): cint {.
   importc, header: "<arpa/inet.h>".}
 
@@ -2153,13 +2156,19 @@ proc nice*(a1: cint): cint {.importc, header: "<unistd.h>".}
 proc pathconf*(a1: cstring, a2: cint): int {.importc, header: "<unistd.h>".}
 
 proc pause*(): cint {.importc, header: "<unistd.h>".}
+proc pclose*(a: File): cint {.importc, header: "<stdio.h>".}
 proc pipe*(a: array[0..1, cint]): cint {.importc, header: "<unistd.h>".}
+proc popen*(a1, a2: cstring): File {.importc, header: "<stdio.h>".}
 proc pread*(a1: cint, a2: pointer, a3: int, a4: Off): int {.
   importc, header: "<unistd.h>".}
 proc pwrite*(a1: cint, a2: pointer, a3: int, a4: Off): int {.
   importc, header: "<unistd.h>".}
 proc read*(a1: cint, a2: pointer, a3: int): int {.importc, header: "<unistd.h>".}
 proc readlink*(a1, a2: cstring, a3: int): int {.importc, header: "<unistd.h>".}
+proc ioctl*(f: FileHandle, device: uint): int {.importc: "ioctl",
+      header: "<sys/ioctl.h>", varargs, tags: [WriteIOEffect].}
+  ## A system call for device-specific input/output operations and other
+  ## operations which cannot be expressed by regular system calls
 
 proc rmdir*(a1: cstring): cint {.importc, header: "<unistd.h>".}
 proc setegid*(a1: Gid): cint {.importc, header: "<unistd.h>".}
@@ -2311,7 +2320,7 @@ proc timer_settime*(a1: Timer, a2: cint, a3: var Itimerspec,
 proc tzset*() {.importc, header: "<time.h>".}
 
 
-proc wait*(a1: var cint): Pid {.importc, header: "<sys/wait.h>".}
+proc wait*(a1: ptr cint): Pid {.importc, discardable, header: "<sys/wait.h>".}
 proc waitid*(a1: cint, a2: Id, a3: var SigInfo, a4: cint): cint {.
   importc, header: "<sys/wait.h>".}
 proc waitpid*(a1: Pid, a2: var cint, a3: cint): Pid {.
@@ -2376,7 +2385,7 @@ proc sched_setscheduler*(a1: Pid, a2: cint, a3: var Sched_param): cint {.
 proc sched_yield*(): cint {.importc, header: "<sched.h>".}
 
 proc strerror*(errnum: cint): cstring {.importc, header: "<string.h>".}
-proc hstrerror*(herrnum: cint): cstring {.importc, header: "<netdb.h>".}
+proc hstrerror*(herrnum: cint): cstring {.importc:"(char *)$1", header: "<netdb.h>".}
 
 proc FD_CLR*(a1: cint, a2: var TFdSet) {.importc, header: "<sys/select.h>".}
 proc FD_ISSET*(a1: cint | SocketHandle, a2: var TFdSet): cint {.
@@ -2560,7 +2569,7 @@ proc endprotoent*() {.importc, header: "<netdb.h>".}
 proc endservent*() {.importc, header: "<netdb.h>".}
 proc freeaddrinfo*(a1: ptr AddrInfo) {.importc, header: "<netdb.h>".}
 
-proc gai_strerror*(a1: cint): cstring {.importc, header: "<netdb.h>".}
+proc gai_strerror*(a1: cint): cstring {.importc:"(char *)$1", header: "<netdb.h>".}
 
 proc getaddrinfo*(a1, a2: cstring, a3: ptr AddrInfo,
                   a4: var ptr AddrInfo): cint {.importc, header: "<netdb.h>".}

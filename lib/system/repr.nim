@@ -21,9 +21,22 @@ proc reprPointer(x: pointer): string {.compilerproc.} =
   return $buf
 
 proc `$`(x: uint64): string =
-  var buf: array [0..59, char]
-  discard c_sprintf(buf, "%llu", x)
-  return $buf
+  if x == 0:
+    result = "0"
+  else:
+    var buf: array [60, char]
+    var i = 0
+    var n = x
+    while n != 0:
+      let nn = n div 10'u64
+      buf[i] = char(n - 10'u64 * nn + ord('0'))
+      inc i
+      n = nn
+
+    let half = i div 2
+    # Reverse
+    for t in 0 .. < half: swap(buf[t], buf[i-t-1])
+    result = $buf
 
 proc reprStrAux(result: var string, s: string) =
   if cast[pointer](s) == nil:
@@ -63,6 +76,7 @@ proc reprEnum(e: int, typ: PNimType): string {.compilerRtl.} =
   # we read an 'int' but this may have been too large, so mask the other bits:
   let e = if typ.size == 1: e and 0xff
           elif typ.size == 2: e and 0xffff
+          elif typ.size == 4: e and 0xffffffff
           else: e
   # XXX we need a proper narrowing based on signedness here
   #e and ((1 shl (typ.size*8)) - 1)
@@ -142,7 +156,7 @@ when not defined(useNimRtl):
 
   proc deinitReprClosure(cl: var ReprClosure) =
     when declared(CellSet): deinit(cl.marked)
-    when hasThreadSupport and hasSharedHeap and declared(heapLock): 
+    when hasThreadSupport and hasSharedHeap and declared(heapLock):
       ReleaseSys(HeapLock)
 
   proc reprBreak(result: var string, cl: ReprClosure) =
@@ -194,18 +208,24 @@ when not defined(useNimRtl):
   proc reprRecord(result: var string, p: pointer, typ: PNimType,
                   cl: var ReprClosure) =
     add result, "["
-    let oldLen = result.len
-    reprRecordAux(result, p, typ.node, cl)
-    if typ.base != nil: 
-      if oldLen != result.len: add result, ",\n"
-      reprRecordAux(result, p, typ.base.node, cl)
+    var curTyp = typ
+    var first = true
+    while curTyp != nil:
+      var part = ""
+      reprRecordAux(part, p, curTyp.node, cl)
+      if part.len > 0:
+        if not first:
+          add result, ",\n"
+        add result, part
+        first = false
+      curTyp = curTyp.base
     add result, "]"
 
   proc reprRef(result: var string, p: pointer, typ: PNimType,
                cl: var ReprClosure) =
     # we know that p is not nil here:
     when declared(CellSet):
-      when defined(boehmGC) or defined(nogc):
+      when defined(boehmGC) or defined(gogc) or defined(nogc):
         var cell = cast[PCell](p)
       else:
         var cell = usrToCell(p)
@@ -226,7 +246,7 @@ when not defined(useNimRtl):
     of tySet: reprSetAux(result, p, typ)
     of tyArray, tyArrayConstr: reprArray(result, p, typ, cl)
     of tyTuple: reprRecord(result, p, typ, cl)
-    of tyObject: 
+    of tyObject:
       var t = cast[ptr PNimType](p)[]
       reprRecord(result, p, t, cl)
     of tyRef, tyPtr:
@@ -240,9 +260,11 @@ when not defined(useNimRtl):
     of tyInt16: add result, $int(cast[ptr int16](p)[])
     of tyInt32: add result, $int(cast[ptr int32](p)[])
     of tyInt64: add result, $(cast[ptr int64](p)[])
-    of tyUInt8: add result, $ze(cast[ptr int8](p)[])
-    of tyUInt16: add result, $ze(cast[ptr int16](p)[])
-    
+    of tyUInt8: add result, $(cast[ptr uint8](p)[])
+    of tyUInt16: add result, $(cast[ptr uint16](p)[])
+    of tyUInt32: add result, $(cast[ptr uint32](p)[])
+    of tyUInt64: add result, $(cast[ptr uint64](p)[])
+
     of tyFloat: add result, $(cast[ptr float](p)[])
     of tyFloat32: add result, $(cast[ptr float32](p)[])
     of tyFloat64: add result, $(cast[ptr float64](p)[])
@@ -250,7 +272,10 @@ when not defined(useNimRtl):
     of tyBool: add result, reprBool(cast[ptr bool](p)[])
     of tyChar: add result, reprChar(cast[ptr char](p)[])
     of tyString: reprStrAux(result, cast[ptr string](p)[])
-    of tyCString: reprStrAux(result, $(cast[ptr cstring](p)[]))
+    of tyCString:
+      let cs = cast[ptr cstring](p)[]
+      if cs.isNil: add result, "nil"
+      else: reprStrAux(result, $cs)
     of tyRange: reprAux(result, p, typ.base, cl)
     of tyProc, tyPointer:
       if cast[PPointer](p)[] == nil: add result, "nil"
@@ -285,4 +310,3 @@ when not defined(useNimRtl):
       reprAux(result, addr(p), typ, cl)
     add result, "\n"
     deinitReprClosure(cl)
-

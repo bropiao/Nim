@@ -154,16 +154,27 @@ proc rawGetKnownHC[A](s: HashSet[A], key: A, hc: Hash): int {.inline.} =
 proc rawGet[A](s: HashSet[A], key: A, hc: var Hash): int {.inline.} =
   rawGetImpl()
 
-proc mget*[A](s: var HashSet[A], key: A): var A =
+proc `[]`*[A](s: var HashSet[A], key: A): var A =
   ## returns the element that is actually stored in 's' which has the same
-  ## value as 'key' or raises the ``EInvalidKey`` exception. This is useful
+  ## value as 'key' or raises the ``KeyError`` exception. This is useful
   ## when one overloaded 'hash' and '==' but still needs reference semantics
   ## for sharing.
   assert s.isValid, "The set needs to be initialized."
   var hc: Hash
   var index = rawGet(s, key, hc)
   if index >= 0: result = s.data[index].key
-  else: raise newException(KeyError, "key not found: " & $key)
+  else:
+    when compiles($key):
+      raise newException(KeyError, "key not found: " & $key)
+    else:
+      raise newException(KeyError, "key not found")
+
+proc mget*[A](s: var HashSet[A], key: A): var A {.deprecated.} =
+  ## returns the element that is actually stored in 's' which has the same
+  ## value as 'key' or raises the ``KeyError`` exception. This is useful
+  ## when one overloaded 'hash' and '==' but still needs reference semantics
+  ## for sharing. Use ```[]``` instead.
+  s[key]
 
 proc contains*[A](s: HashSet[A], key: A): bool =
   ## Returns true iff `key` is in `s`.
@@ -944,7 +955,7 @@ when isMainModule and not defined(release):
       var b = initOrderedSet[int]()
       for x in [2, 4, 5]: b.incl(x)
       assert($a == $b)
-      assert(a == b) # https://github.com/Araq/Nimrod/issues/1413
+      assert(a == b) # https://github.com/Araq/Nim/issues/1413
 
     block initBlocks:
       var a: OrderedSet[int]

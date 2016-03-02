@@ -11,8 +11,8 @@ type
     of mLine: data: string
 
 var
-  producer, consumer: TThread[void]
-  chan: TChannel[TMsg]
+  producer, consumer: Thread[void]
+  chan: Channel[TMsg]
   printedLines = 0
 
 proc consume() {.thread.} =
@@ -32,7 +32,7 @@ proc produce() {.thread.} =
   close(input)
   m.k = mEof
   chan.send(m)
-  
+
 open(chan)
 createThread[void](consumer, consume)
 createThread[void](producer, produce)

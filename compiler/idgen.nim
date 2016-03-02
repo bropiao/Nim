@@ -18,40 +18,40 @@ const
 
 when debugIds:
   import intsets
-  
+
   var usedIds = initIntSet()
 
-proc registerID*(id: PIdObj) = 
-  when debugIds: 
-    if id.id == -1 or containsOrIncl(usedIds, id.id): 
+proc registerID*(id: PIdObj) =
+  when debugIds:
+    if id.id == -1 or containsOrIncl(usedIds, id.id):
       internalError("ID already used: " & $id.id)
 
-proc getID*(): int {.inline.} = 
+proc getID*(): int {.inline.} =
   result = gFrontEndId
   inc(gFrontEndId)
 
-proc backendId*(): int {.inline.} = 
+proc backendId*(): int {.inline.} =
   result = gBackendId
   inc(gBackendId)
 
-proc setId*(id: int) {.inline.} = 
+proc setId*(id: int) {.inline.} =
   gFrontEndId = max(gFrontEndId, id + 1)
 
-proc idSynchronizationPoint*(idRange: int) = 
+proc idSynchronizationPoint*(idRange: int) =
   gFrontEndId = (gFrontEndId div idRange + 1) * idRange + 1
 
 proc toGid(f: string): string =
   # we used to use ``f.addFileExt("gid")`` (aka ``$project.gid``), but this
   # will cause strange bugs if multiple projects are in the same folder, so
   # we simply use a project independent name:
-  result = options.completeGeneratedFilePath("nimrod.gid")
+  result = options.completeGeneratedFilePath("nim.gid")
 
 proc saveMaxIds*(project: string) =
   var f = open(project.toGid, fmWrite)
-  f.writeln($gFrontEndId)
-  f.writeln($gBackendId)
+  f.writeLine($gFrontEndId)
+  f.writeLine($gBackendId)
   f.close()
-  
+
 proc loadMaxIds*(project: string) =
   var f: File
   if open(f, project.toGid, fmRead):

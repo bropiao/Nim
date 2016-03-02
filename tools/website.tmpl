@@ -1,5 +1,5 @@
-#! stdtmpl | standard
-#proc generateHTMLPage(c: var TConfigData, currentTab, content, rss: string): string = 
+#? stdtmpl | standard
+#proc generateHTMLPage(c: var TConfigData, currentTab, content, rss: string): string =
 #  result = ""
 <!DOCTYPE html>
 <html>
@@ -23,7 +23,7 @@
       # if t != "index" and t != "community" and t != "news":
       #   let name = c.tabs[i].key
       #   if currentTab == t:
-            <a class="active" 
+            <a class="active"
       #   else:
             <a
       #   end if
@@ -49,21 +49,12 @@
 #  if currentTab == "index":
         <div id="slideshow">
           <!-- slides -->
-          <div id="slide0" class="active">
-            <h2><a name="why-should-i-be-excited">Why should I be excited?</a></h2>
-            <span class="desc">Nim is the only language that leverages automated proof technology to perform a <i>disjoint check</i> for your parallel code. Working on disjoint data means no locking is required and yet data races are impossible:</span><br><br>
-<pre>
-<span class="kwd">parallel</span>:
-<span class="tab">  </span><span class="kwd">var</span> i = <span class="val">0</span>
-<span class="tab">  </span><span class="kwd">while</span> i <= a.high:
-<span class="tab">  <span class="tab">  </span></span></span><span class="kwd">spawn</span> f(a[i])
-<span class="tab">  <span class="tab">  </span></span></span><span class="kwd">spawn</span> f(a[i+<span class="val">1</span>])
-<span class="tab">  <span class="tab">  </span></span></span><span class="cmt"># ERROR: cannot prove a[i] is disjoint from a[i+1]</span>
-<span class="tab">  <span class="tab">  </span></span></span><span class="cmt"># BUT: replace 'i += 1' with 'i += 2' and the code compiles!</span>
-<span class="tab end">  <span class="tab end">  </span></span>i += <span class="val">1</span>
-</pre>
+          <div id="slide0" class="active niaslide">
+            <a href="news.html#Z2016-01-27-nim-in-action-is-now-available">
+              <img src="assets/niminaction/banner.jpg" alt="New in Manning Early Access Program: Nim in Action!"/>
+            </a>
           </div>
-          <div id="slide1">
+          <div id="slide1" class="codeslide2">
             <div>
               <h2>Nim is simple..</h2>
 <pre>
@@ -97,14 +88,14 @@ p.greet() <span class="cmt"># or greet(p)</span>
 </pre>
              </div>
           </div>
-          <div id="slide2" class="">
+          <div id="slide2" class="codeslide3">
             <div>
               <h2>C FFI is easy in Nim..</h2>
 <pre>
 <span class="cmt"># declare a C procedure..</span>
 <span class="kwd">proc</span> <span class="def">unsafeScanf</span>(f: <span class="typ">File</span>, s: <span class="typ">cstring</span>)
 <span class="tab">  </span>{.varargs,
-<span class="tab">    </span>importc: <span class="val">"fscanf"</span>, 
+<span class="tab">    </span>importc: <span class="val">"fscanf"</span>,
 <span class="tab end">    </span>header: <span class="val">"&lt;stdio.h&gt;"</span>.}
 
 <span class="cmt"># ..and use it...</span>
@@ -175,7 +166,7 @@ runForever()
 						<a href="documentation.html">Stable Documentation</a>
 						<a href="learn.html">Learning Resources</a>
 					<!--	<a href="">Development Documentation</a> -->
-						<a href="https://github.com/Araq/Nimrod">Issues &amp; Requests</a>
+						<a href="https://github.com/nim-lang/nim">Issues &amp; Requests</a>
 					</div>
 					<div>
 						<h4>Community</h4>
@@ -187,11 +178,11 @@ runForever()
 				<div id="foot-legal">
 					<h4>Written in Nim - Powered by <a href="https://github.com/dom96/jester">Jester</a></h4>
 					Web Design by <a href="http://reign-studios.net/philipwitte/">Philip Witte</a> &amp; <a href="http://picheta.me/">Dominik Picheta</a><br>
-					Copyright © 2015 - <a href="http://nim-lang.org/blog/">Andreas Rumpf</a> &amp; <a href="https://github.com/Araq/Nimrod/graphs/contributors">Contributors</a>
+					Copyright © 2015 - <a href="http://nim-lang.org/blog/">Andreas Rumpf</a> &amp; <a href="https://github.com/nim-lang/nim/graphs/contributors">Contributors</a>
 				</div>
 			</div>
 		</footer>
-  
+
 #  if currentTab == "index":
   <script src="assets/index.js"></script>
 # end if

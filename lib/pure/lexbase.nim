@@ -28,44 +28,26 @@ type
   BaseLexer* = object of RootObj ## the base lexer. Inherit your lexer from
                                  ## this object.
     bufpos*: int              ## the current position within the buffer
-    buf*: cstring             ## the buffer itself
+    when defined(js):         ## the buffer itself
+      buf*: string
+    else:
+      buf*: cstring
     bufLen*: int              ## length of buffer in characters
     input: Stream            ## the input stream
     lineNumber*: int          ## the current line number
     sentinel: int
     lineStart: int            # index of last line start in buffer
-    fileOpened: bool
+    refillChars: set[char]
 
 {.deprecated: [TBaseLexer: BaseLexer].}
-
-proc open*(L: var BaseLexer, input: Stream, bufLen: int = 8192)
-  ## inits the BaseLexer with a stream to read from
-
-proc close*(L: var BaseLexer)
-  ## closes the base lexer. This closes `L`'s associated stream too.
-
-proc getCurrentLine*(L: BaseLexer, marker: bool = true): string
-  ## retrieves the current line.
-
-proc getColNumber*(L: BaseLexer, pos: int): int
-  ## retrieves the current column.
-
-proc handleCR*(L: var BaseLexer, pos: int): int
-  ## Call this if you scanned over '\c' in the buffer; it returns the the
-  ## position to continue the scanning from. `pos` must be the position
-  ## of the '\c'.
-proc handleLF*(L: var BaseLexer, pos: int): int
-  ## Call this if you scanned over '\L' in the buffer; it returns the the
-  ## position to continue the scanning from. `pos` must be the position
-  ## of the '\L'.
-
-# implementation
 
 const
   chrSize = sizeof(char)
 
-proc close(L: var BaseLexer) =
-  dealloc(L.buf)
+proc close*(L: var BaseLexer) =
+  ## closes the base lexer. This closes `L`'s associated stream too.
+  when not defined(js):
+    dealloc(L.buf)
   close(L.input)
 
 proc fillBuffer(L: var BaseLexer) =
@@ -80,8 +62,11 @@ proc fillBuffer(L: var BaseLexer) =
   toCopy = L.bufLen - L.sentinel - 1
   assert(toCopy >= 0)
   if toCopy > 0:
-    moveMem(L.buf, addr(L.buf[L.sentinel + 1]), toCopy * chrSize) 
-    # "moveMem" handles overlapping regions
+    when defined(js):
+      for i in 0 ..< toCopy: L.buf[i] = L.buf[L.sentinel + 1 + i]
+    else:
+      # "moveMem" handles overlapping regions
+      moveMem(L.buf, addr L.buf[L.sentinel + 1], toCopy * chrSize)
   charsRead = readData(L.input, addr(L.buf[toCopy]),
                        (L.sentinel + 1) * chrSize) div chrSize
   s = toCopy + charsRead
@@ -93,7 +78,7 @@ proc fillBuffer(L: var BaseLexer) =
     dec(s)                    # BUGFIX (valgrind)
     while true:
       assert(s < L.bufLen)
-      while (s >= 0) and not (L.buf[s] in NewLines): dec(s)
+      while s >= 0 and L.buf[s] notin L.refillChars: dec(s)
       if s >= 0:
         # we found an appropriate character for a sentinel:
         L.sentinel = s
@@ -103,7 +88,10 @@ proc fillBuffer(L: var BaseLexer) =
         # double the buffer's size and try again:
         oldBufLen = L.bufLen
         L.bufLen = L.bufLen * 2
-        L.buf = cast[cstring](realloc(L.buf, L.bufLen * chrSize))
+        when defined(js):
+          L.buf.setLen(L.bufLen)
+        else:
+          L.buf = cast[cstring](realloc(L.buf, L.bufLen * chrSize))
         assert(L.bufLen - oldBufLen == oldBufLen)
         charsRead = readData(L.input, addr(L.buf[oldBufLen]),
                              oldBufLen * chrSize) div chrSize
@@ -121,18 +109,30 @@ proc fillBaseLexer(L: var BaseLexer, pos: int): int =
     fillBuffer(L)
     L.bufpos = 0              # XXX: is this really correct?
     result = 0
-  L.lineStart = result
 
-proc handleCR(L: var BaseLexer, pos: int): int =
+proc handleCR*(L: var BaseLexer, pos: int): int =
+  ## Call this if you scanned over '\c' in the buffer; it returns the the
+  ## position to continue the scanning from. `pos` must be the position
+  ## of the '\c'.
   assert(L.buf[pos] == '\c')
   inc(L.lineNumber)
   result = fillBaseLexer(L, pos)
   if L.buf[result] == '\L':
     result = fillBaseLexer(L, result)
+  L.lineStart = result
 
-proc handleLF(L: var BaseLexer, pos: int): int =
+proc handleLF*(L: var BaseLexer, pos: int): int =
+  ## Call this if you scanned over '\L' in the buffer; it returns the the
+  ## position to continue the scanning from. `pos` must be the position
+  ## of the '\L'.
   assert(L.buf[pos] == '\L')
   inc(L.lineNumber)
+  result = fillBaseLexer(L, pos) #L.lastNL := result-1; // BUGFIX: was: result;
+  L.lineStart = result
+
+proc handleRefillChar*(L: var BaseLexer, pos: int): int =
+  ## To be documented.
+  assert(L.buf[pos] in L.refillChars)
   result = fillBaseLexer(L, pos) #L.lastNL := result-1; // BUGFIX: was: result;
 
 proc skipUtf8Bom(L: var BaseLexer) =
@@ -140,23 +140,31 @@ proc skipUtf8Bom(L: var BaseLexer) =
     inc(L.bufpos, 3)
     inc(L.lineStart, 3)
 
-proc open(L: var BaseLexer, input: Stream, bufLen: int = 8192) =
+proc open*(L: var BaseLexer, input: Stream, bufLen: int = 8192;
+           refillChars: set[char] = NewLines) =
+  ## inits the BaseLexer with a stream to read from.
   assert(bufLen > 0)
   assert(input != nil)
   L.input = input
   L.bufpos = 0
   L.bufLen = bufLen
-  L.buf = cast[cstring](alloc(bufLen * chrSize))
+  L.refillChars = refillChars
+  when defined(js):
+    L.buf = newString(bufLen)
+  else:
+    L.buf = cast[cstring](alloc(bufLen * chrSize))
   L.sentinel = bufLen - 1
   L.lineStart = 0
   L.lineNumber = 1            # lines start at 1
   fillBuffer(L)
   skipUtf8Bom(L)
 
-proc getColNumber(L: BaseLexer, pos: int): int =
+proc getColNumber*(L: BaseLexer, pos: int): int =
+  ## retrieves the current column.
   result = abs(pos - L.lineStart)
 
-proc getCurrentLine(L: BaseLexer, marker: bool = true): string =
+proc getCurrentLine*(L: BaseLexer, marker: bool = true): string =
+  ## retrieves the current line.
   var i: int
   result = ""
   i = L.lineStart
@@ -166,4 +174,3 @@ proc getCurrentLine(L: BaseLexer, marker: bool = true): string =
   add(result, "\n")
   if marker:
     add(result, spaces(getColNumber(L, L.bufpos)) & "^\n")
-

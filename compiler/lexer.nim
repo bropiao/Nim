@@ -44,7 +44,8 @@ type
     tkLet,
     tkMacro, tkMethod, tkMixin, tkMod, tkNil, tkNot, tkNotin,
     tkObject, tkOf, tkOr, tkOut,
-    tkProc, tkPtr, tkRaise, tkRef, tkReturn, tkShl, tkShr, tkStatic,
+    tkProc, tkPtr, tkRaise, tkRef, tkReturn,
+    tkShl, tkShr, tkStatic,
     tkTemplate,
     tkTry, tkTuple, tkType, tkUsing,
     tkVar, tkWhen, tkWhile, tkWith, tkWithout, tkXor,
@@ -263,13 +264,6 @@ template eatChar(L: var TLexer, t: var TToken) =
   inc(L.bufpos)
 
 proc getNumber(L: var TLexer): TToken =
-  var
-    startpos, endpos: int
-    xi: BiggestInt
-  const literalishChars = {   'A'..'F', 'a'..'f', '0'..'9', 'X', 'x', 'o', 'c',
-    'C', 'b', 'B', '_', '.', '\''}
-  const literalishCharsNoDot = literalishChars - {'.'}
-
   proc matchUnderscoreChars(L: var TLexer, tok: var TToken, chars: set[char]) =
     var pos = L.bufpos              # use registers for pos, buf
     var buf = L.buf
@@ -318,14 +312,22 @@ proc getNumber(L: var TLexer): TToken =
     L.bufpos = msgPos
     lexMessage(L, msg, t.literal)
 
+  var
+    startpos, endpos: int
+    xi: BiggestInt
+    isBase10 = true
+  const
+    baseCodeChars = {'X', 'x', 'o', 'c', 'C', 'b', 'B'}
+    literalishChars = baseCodeChars + {'A'..'F', 'a'..'f', '0'..'9', '_', '\''}
+    floatTypes = {tkFloatLit, tkFloat32Lit, tkFloat64Lit, tkFloat128Lit}
   result.tokType = tkIntLit   # int literal until we know better
   result.literal = ""
   result.base = base10
   startpos = L.bufpos
-  var isAFloatLiteral = false
+
   # First stage: find out base, make verifications, build token literal string
-  if  L.buf[L.bufpos] == '0' and 
-      L.buf[L.bufpos + 1] in {'X', 'x', 'o', 'O', 'c', 'C', 'b', 'B'}:
+  if L.buf[L.bufpos] == '0' and L.buf[L.bufpos + 1] in baseCodeChars + {'O'}:
+    isBase10 = false
     eatChar(L, result, '0')
     case L.buf[L.bufpos]
     of 'O':
@@ -344,21 +346,23 @@ proc getNumber(L: var TLexer): TToken =
   else:
     matchUnderscoreChars(L, result, {'0'..'9'})
     if (L.buf[L.bufpos] == '.') and (L.buf[L.bufpos + 1] in {'0'..'9'}):
-      isAFloatLiteral = true
+      result.tokType = tkFloat64Lit
       eatChar(L, result, '.')
       matchUnderscoreChars(L, result, {'0'..'9'})
     if L.buf[L.bufpos] in {'e', 'E'}:
-      isAFloatLiteral = true
+      result.tokType = tkFloat64Lit
       eatChar(L, result, 'e')
       if L.buf[L.bufpos] in {'+', '-'}:
         eatChar(L, result)
       matchUnderscoreChars(L, result, {'0'..'9'})
   endpos = L.bufpos
-  # Second stage, find out if there's a datatype postfix and handle it
+
+  # Second stage, find out if there's a datatype suffix and handle it
   var postPos = endpos
   if L.buf[postPos] in {'\'', 'f', 'F', 'd', 'D', 'i', 'I', 'u', 'U'}:
-    if L.buf[postPos] == '\'': 
+    if L.buf[postPos] == '\'':
       inc(postPos)
+
     case L.buf[postPos]
     of 'f', 'F':
       inc(postPos)
@@ -410,21 +414,23 @@ proc getNumber(L: var TLexer): TToken =
         inc(postPos)
       else:
         result.tokType = tkUIntLit
-    else: 
+    else:
       lexMessageLitNum(L, errInvalidNumber, startpos)
+
   # Is there still a literalish char awaiting? Then it's an error!
-  if  L.buf[postPos] in literalishCharsNoDot or 
+  if  L.buf[postPos] in literalishChars or
      (L.buf[postPos] == '.' and L.buf[postPos + 1] in {'0'..'9'}):
     lexMessageLitNum(L, errInvalidNumber, startpos)
+
   # Third stage, extract actual number
   L.bufpos = startpos            # restore position
   var pos: int = startpos
   try:
-    if (L.buf[pos] == '0') and
-        (L.buf[pos + 1] in {'x', 'X', 'b', 'B', 'o', 'O', 'c', 'C'}):
+    if (L.buf[pos] == '0') and (L.buf[pos + 1] in baseCodeChars):
       inc(pos, 2)
       xi = 0                  # it is a base prefix
-      case L.buf[pos - 1]     # now look at the optional type suffix:
+
+      case L.buf[pos - 1]
       of 'b', 'B':
         result.base = base2
         while pos < endpos:
@@ -452,48 +458,76 @@ proc getNumber(L: var TLexer): TToken =
           of 'A'..'F':
             xi = `shl`(xi, 4) or (ord(L.buf[pos]) - ord('A') + 10)
             inc(pos)
-          else: 
+          else:
             break
-      else: 
+      else:
         internalError(getLineInfo(L), "getNumber")
+
       case result.tokType
       of tkIntLit, tkInt64Lit: result.iNumber = xi
       of tkInt8Lit: result.iNumber = BiggestInt(int8(toU8(int(xi))))
-      of tkInt16Lit: result.iNumber = BiggestInt(toU16(int(xi)))
-      of tkInt32Lit: result.iNumber = BiggestInt(toU32(xi))
+      of tkInt16Lit: result.iNumber = BiggestInt(int16(toU16(int(xi))))
+      of tkInt32Lit: result.iNumber = BiggestInt(int32(toU32(int64(xi))))
       of tkUIntLit, tkUInt64Lit: result.iNumber = xi
-      of tkUInt8Lit: result.iNumber = BiggestInt(int8(toU8(int(xi))))
-      of tkUInt16Lit: result.iNumber = BiggestInt(toU16(int(xi)))
-      of tkUInt32Lit: result.iNumber = BiggestInt(toU32(xi))
+      of tkUInt8Lit: result.iNumber = BiggestInt(uint8(toU8(int(xi))))
+      of tkUInt16Lit: result.iNumber = BiggestInt(uint16(toU16(int(xi))))
+      of tkUInt32Lit: result.iNumber = BiggestInt(uint32(toU32(int64(xi))))
       of tkFloat32Lit:
         result.fNumber = (cast[PFloat32](addr(xi)))[]
         # note: this code is endian neutral!
         # XXX: Test this on big endian machine!
       of tkFloat64Lit: result.fNumber = (cast[PFloat64](addr(xi)))[]
       else: internalError(getLineInfo(L), "getNumber")
-    elif isAFloatLiteral or (result.tokType == tkFloat32Lit) or
-        (result.tokType == tkFloat64Lit):
-      result.fNumber = parseFloat(result.literal)
-      if result.tokType == tkIntLit: result.tokType = tkFloatLit
-    elif result.tokType == tkUint64Lit:
-      xi = 0
-      let len = unsafeParseUInt(result.literal, xi)
-      if len != result.literal.len or len == 0:
-        raise newException(ValueError, "invalid integer: " & $xi)
-      result.iNumber = xi
-    else:
-      result.iNumber = parseBiggestInt(result.literal)
-      if (result.iNumber < low(int32)) or (result.iNumber > high(int32)):
-        if result.tokType == tkIntLit:
-          result.tokType = tkInt64Lit
-        elif result.tokType in {tkInt8Lit, tkInt16Lit, tkInt32Lit}:
+
+      # Bounds checks. Non decimal literals are allowed to overflow the range of
+      # the datatype as long as their pattern don't overflow _bitwise_, hence
+      # below checks of signed sizes against uint*.high is deliberate:
+      # (0x80'u8 = 128, 0x80'i8 = -128, etc == OK)
+      if result.tokType notin floatTypes:
+        let outOfRange = case result.tokType:
+        of tkUInt8Lit, tkUInt16Lit, tkUInt32Lit: result.iNumber != xi
+        of tkInt8Lit: (xi > BiggestInt(uint8.high))
+        of tkInt16Lit: (xi > BiggestInt(uint16.high))
+        of tkInt32Lit: (xi > BiggestInt(uint32.high))
+        else: false
+
+        if outOfRange:
+          #echo "out of range num: ", result.iNumber, " vs ", xi
           lexMessageLitNum(L, errNumberOutOfRange, startpos)
-      elif result.tokType == tkInt8Lit and
-          (result.iNumber < int8.low or result.iNumber > int8.high):
-        lexMessageLitNum(L, errNumberOutOfRange, startpos)
-      elif result.tokType == tkInt16Lit and
-          (result.iNumber < int16.low or result.iNumber > int16.high):
-        lexMessageLitNum(L, errNumberOutOfRange, startpos)
+
+    else:
+      case result.tokType
+      of floatTypes:
+        result.fNumber = parseFloat(result.literal)
+      of tkUint64Lit:
+        xi = 0
+        let len = unsafeParseUInt(result.literal, xi)
+        if len != result.literal.len or len == 0:
+          raise newException(ValueError, "invalid integer: " & $xi)
+        result.iNumber = xi
+      else:
+        result.iNumber = parseBiggestInt(result.literal)
+
+      # Explicit bounds checks
+      let outOfRange = case result.tokType:
+      of tkInt8Lit: (result.iNumber < int8.low or result.iNumber > int8.high)
+      of tkUInt8Lit: (result.iNumber < BiggestInt(uint8.low) or
+                      result.iNumber > BiggestInt(uint8.high))
+      of tkInt16Lit: (result.iNumber < int16.low or result.iNumber > int16.high)
+      of tkUInt16Lit: (result.iNumber < BiggestInt(uint16.low) or
+                      result.iNumber > BiggestInt(uint16.high))
+      of tkInt32Lit: (result.iNumber < int32.low or result.iNumber > int32.high)
+      of tkUInt32Lit: (result.iNumber < BiggestInt(uint32.low) or
+                      result.iNumber > BiggestInt(uint32.high))
+      else: false
+
+      if outOfRange: lexMessageLitNum(L, errNumberOutOfRange, startpos)
+
+    # Promote int literal to int64? Not always necessary, but more consistent
+    if result.tokType == tkIntLit:
+      if (result.iNumber < low(int32)) or (result.iNumber > high(int32)):
+        result.tokType = tkInt64Lit
+
   except ValueError:
     lexMessageLitNum(L, errInvalidNumber, startpos)
   except OverflowError, RangeError:
@@ -629,6 +663,7 @@ proc getString(L: var TLexer, tok: var TToken, rawMode: bool) =
         L.lineNumber = line
         lexMessagePos(L, errClosingTripleQuoteExpected, L.lineStart)
         L.lineNumber = line2
+        L.bufpos = pos
         break
       else:
         add(tok.literal, buf[pos])
@@ -735,24 +770,88 @@ proc getOperator(L: var TLexer, tok: var TToken) =
   if buf[pos] in {CR, LF, nimlexbase.EndOfFile}:
     tok.strongSpaceB = -1
 
+proc skipMultiLineComment(L: var TLexer; tok: var TToken; start: int;
+                          isDoc: bool) =
+  var pos = start
+  var buf = L.buf
+  var toStrip = 0
+  # detect the amount of indentation:
+  if isDoc:
+    toStrip = getColNumber(L, pos)
+    while buf[pos] == ' ': inc pos
+    if buf[pos] in {CR, LF}:
+      pos = handleCRLF(L, pos)
+      buf = L.buf
+      toStrip = 0
+      while buf[pos] == ' ':
+        inc pos
+        inc toStrip
+  var nesting = 0
+  while true:
+    case buf[pos]
+    of '#':
+      if isDoc:
+        if buf[pos+1] == '#' and buf[pos+2] == '[':
+          inc nesting
+        tok.literal.add '#'
+      elif buf[pos+1] == '[':
+        inc nesting
+      inc pos
+    of ']':
+      if isDoc:
+        if buf[pos+1] == '#' and buf[pos+2] == '#':
+          if nesting == 0:
+            inc(pos, 3)
+            break
+          dec nesting
+        tok.literal.add ']'
+      elif buf[pos+1] == '#':
+        if nesting == 0:
+          inc(pos, 2)
+          break
+        dec nesting
+      inc pos
+    of '\t':
+      lexMessagePos(L, errTabulatorsAreNotAllowed, pos)
+      inc(pos)
+      if isDoc: tok.literal.add '\t'
+    of CR, LF:
+      pos = handleCRLF(L, pos)
+      buf = L.buf
+      # strip leading whitespace:
+      if isDoc:
+        tok.literal.add "\n"
+        inc tok.iNumber
+        var c = toStrip
+        while buf[pos] == ' ' and c > 0:
+          inc pos
+          dec c
+    of nimlexbase.EndOfFile:
+      lexMessagePos(L, errGenerated, pos, "end of multiline comment expected")
+      break
+    else:
+      if isDoc: tok.literal.add buf[pos]
+      inc(pos)
+  L.bufpos = pos
+
 proc scanComment(L: var TLexer, tok: var TToken) =
   var pos = L.bufpos
   var buf = L.buf
-  when not defined(nimfix):
-    assert buf[pos+1] == '#'
-    if buf[pos+2] == '[':
-      if buf[pos+3] == ']':
-        #  ##[] is the (rather complex) "cursor token" for idetools
-        tok.tokType = tkComment
-        tok.literal = "[]"
-        inc(L.bufpos, 4)
-        return
-      else:
-        lexMessagePos(L, warnDeprecated, pos, "use '## [' instead; '##['")
-
   tok.tokType = tkComment
   # iNumber contains the number of '\n' in the token
   tok.iNumber = 0
+  when not defined(nimfix):
+    assert buf[pos+1] == '#'
+    if buf[pos+2] == '[':
+      skipMultiLineComment(L, tok, pos+3, true)
+      return
+    inc(pos, 2)
+
+  var toStrip = 0
+  while buf[pos] == ' ':
+    inc pos
+    inc toStrip
+
   when defined(nimfix):
     var col = getColNumber(L, pos)
   while true:
@@ -786,6 +885,12 @@ proc scanComment(L: var TLexer, tok: var TToken) =
     if doContinue():
       tok.literal.add "\n"
       when defined(nimfix): col = indent
+      else:
+        inc(pos, 2)
+        var c = toStrip
+        while buf[pos] == ' ' and c > 0:
+          inc pos
+          dec c
       inc tok.iNumber
     else:
       if buf[pos] > ' ':
@@ -809,9 +914,16 @@ proc skip(L: var TLexer, tok: var TToken) =
       pos = handleCRLF(L, pos)
       buf = L.buf
       var indent = 0
-      while buf[pos] == ' ':
-        inc(pos)
-        inc(indent)
+      while true:
+        if buf[pos] == ' ':
+          inc(pos)
+          inc(indent)
+        elif buf[pos] == '#' and buf[pos+1] == '[':
+          skipMultiLineComment(L, tok, pos+2, false)
+          pos = L.bufpos
+          buf = L.buf
+        else:
+          break
       tok.strongSpaceA = 0
       when defined(nimfix):
         template doBreak(): expr = buf[pos] > ' '
@@ -829,8 +941,11 @@ proc skip(L: var TLexer, tok: var TToken) =
         # do not skip documentation comment:
         if buf[pos+1] == '#': break
         if buf[pos+1] == '[':
-          lexMessagePos(L, warnDeprecated, pos, "use '# [' instead; '#['")
-        while buf[pos] notin {CR, LF, nimlexbase.EndOfFile}: inc(pos)
+          skipMultiLineComment(L, tok, pos+2, false)
+          pos = L.bufpos
+          buf = L.buf
+        else:
+          while buf[pos] notin {CR, LF, nimlexbase.EndOfFile}: inc(pos)
     else:
       break                   # EndOfFile also leaves the loop
   L.bufpos = pos

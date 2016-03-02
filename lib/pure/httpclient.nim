@@ -81,7 +81,7 @@
 
 import net, strutils, uri, parseutils, strtabs, base64, os, mimetypes, math
 import asyncnet, asyncdispatch
-import rawsockets
+import nativesockets
 
 type
   Response* = tuple[
@@ -110,7 +110,7 @@ type
   EInvalidProtocol: ProtocolError, EHttpRequestErr: HttpRequestError
 ].}
 
-const defUserAgent* = "Nim httpclient/0.1"
+const defUserAgent* = "Nim httpclient/" & NimVersion
 
 proc httpError(msg: string) =
   var e: ref ProtocolError
@@ -166,12 +166,12 @@ proc parseChunks(s: Socket, timeout: int): string =
 
 proc parseBody(s: Socket, headers: StringTableRef, timeout: int): string =
   result = ""
-  if headers["Transfer-Encoding"] == "chunked":
+  if headers.getOrDefault"Transfer-Encoding" == "chunked":
     result = parseChunks(s, timeout)
   else:
     # -REGION- Content-Length
     # (http://tools.ietf.org/html/rfc2616#section-4.4) NR.3
-    var contentLengthHeader = headers["Content-Length"]
+    var contentLengthHeader = headers.getOrDefault"Content-Length"
     if contentLengthHeader != "":
       var length = contentLengthHeader.parseint()
       if length > 0:
@@ -190,7 +190,7 @@ proc parseBody(s: Socket, headers: StringTableRef, timeout: int): string =
 
       # -REGION- Connection: Close
       # (http://tools.ietf.org/html/rfc2616#section-4.4) NR.5
-      if headers["Connection"] == "close":
+      if headers.getOrDefault"Connection" == "close":
         var buf = ""
         while true:
           buf = newString(4000)
@@ -389,6 +389,7 @@ proc request*(url: string, httpMethod: string, extraHeaders = "",
   ## | An optional timeout can be specified in milliseconds, if reading from the
   ## server takes longer than specified an ETimeout exception will be raised.
   var r = if proxy == nil: parseUri(url) else: proxy.url
+  var hostUrl = if proxy == nil: r else: parseUri(url)
   var headers = substr(httpMethod, len("http"))
   # TODO: Use generateHeaders further down once it supports proxies.
   if proxy == nil:
@@ -402,7 +403,11 @@ proc request*(url: string, httpMethod: string, extraHeaders = "",
 
   headers.add(" HTTP/1.1\c\L")
 
-  add(headers, "Host: " & r.hostname & "\c\L")
+  if hostUrl.port == "":
+    add(headers, "Host: " & hostUrl.hostname & "\c\L")
+  else:
+    add(headers, "Host: " & hostUrl.hostname & ":" & hostUrl.port & "\c\L")
+
   if userAgent != "":
     add(headers, "User-Agent: " & userAgent & "\c\L")
   if proxy != nil and proxy.auth != "":
@@ -410,7 +415,6 @@ proc request*(url: string, httpMethod: string, extraHeaders = "",
     add(headers, "Proxy-Authorization: basic " & auth & "\c\L")
   add(headers, extraHeaders)
   add(headers, "\c\L")
-
   var s = newSocket()
   if s == nil: raiseOSError(osLastError())
   var port = net.Port(80)
@@ -451,14 +455,15 @@ proc redirection(status: string): bool =
     if status.startsWith(i):
       return true
 
-proc getNewLocation(lastUrl: string, headers: StringTableRef): string =
-  result = headers["Location"]
+proc getNewLocation(lastURL: string, headers: StringTableRef): string =
+  result = headers.getOrDefault"Location"
   if result == "": httpError("location header expected")
   # Relative URLs. (Not part of the spec, but soon will be.)
   let r = parseUri(result)
   if r.hostname == "" and r.path != "":
-    let origParsed = parseUri(lastUrl)
-    result = origParsed.hostname & "/" & r.path
+    var parsed = parseUri(lastURL)
+    parsed.path = r.path
+    result = $parsed
 
 proc get*(url: string, extraHeaders = "", maxRedirects = 5,
           sslContext: SSLContext = defaultSSLContext,
@@ -477,7 +482,7 @@ proc get*(url: string, extraHeaders = "", maxRedirects = 5,
       let redirectTo = getNewLocation(lastURL, result.headers)
       result = request(redirectTo, httpGET, extraHeaders, "", sslContext,
                        timeout, userAgent, proxy)
-      lastUrl = redirectTo
+      lastURL = redirectTo
 
 proc getContent*(url: string, extraHeaders = "", maxRedirects = 5,
                  sslContext: SSLContext = defaultSSLContext,
@@ -524,14 +529,14 @@ proc post*(url: string, extraHeaders = "", body = "",
 
   result = request(url, httpPOST, xh, xb, sslContext, timeout, userAgent,
                    proxy)
-  var lastUrl = ""
+  var lastURL = url
   for i in 1..maxRedirects:
     if result.status.redirection():
       let redirectTo = getNewLocation(lastURL, result.headers)
       var meth = if result.status != "307": httpGet else: httpPost
       result = request(redirectTo, meth, xh, xb, sslContext, timeout,
                        userAgent, proxy)
-      lastUrl = redirectTo
+      lastURL = redirectTo
 
 proc postContent*(url: string, extraHeaders = "", body = "",
                   maxRedirects = 5,
@@ -580,7 +585,11 @@ proc generateHeaders(r: Uri, httpMethod: string,
     result.add("?" & r.query)
   result.add(" HTTP/1.1\c\L")
 
-  add(result, "Host: " & r.hostname & "\c\L")
+  if r.port == "":
+    add(result, "Host: " & r.hostname & "\c\L")
+  else:
+    add(result, "Host: " & r.hostname & ":" & r.port & "\c\L")
+
   add(result, "Connection: Keep-Alive\c\L")
   if body.len > 0 and not headers.hasKey("Content-Length"):
     add(result, "Content-Length: " & $body.len & "\c\L")
@@ -671,12 +680,12 @@ proc parseChunks(client: AsyncHttpClient): Future[string] {.async.} =
 proc parseBody(client: AsyncHttpClient,
                headers: StringTableRef): Future[string] {.async.} =
   result = ""
-  if headers["Transfer-Encoding"] == "chunked":
+  if headers.getOrDefault"Transfer-Encoding" == "chunked":
     result = await parseChunks(client)
   else:
     # -REGION- Content-Length
     # (http://tools.ietf.org/html/rfc2616#section-4.4) NR.3
-    var contentLengthHeader = headers["Content-Length"]
+    var contentLengthHeader = headers.getOrDefault"Content-Length"
     if contentLengthHeader != "":
       var length = contentLengthHeader.parseint()
       if length > 0:
@@ -691,7 +700,7 @@ proc parseBody(client: AsyncHttpClient,
 
       # -REGION- Connection: Close
       # (http://tools.ietf.org/html/rfc2616#section-4.4) NR.5
-      if headers["Connection"] == "close":
+      if headers.getOrDefault"Connection" == "close":
         var buf = ""
         while true:
           buf = await client.socket.recvFull(4000)
@@ -756,10 +765,10 @@ proc newConnection(client: AsyncHttpClient, url: Uri) {.async.} =
     let port =
       if url.port == "":
         if url.scheme.toLower() == "https":
-          rawsockets.Port(443)
+          nativesockets.Port(443)
         else:
-          rawsockets.Port(80)
-      else: rawsockets.Port(url.port.parseInt)
+          nativesockets.Port(80)
+      else: nativesockets.Port(url.port.parseInt)
 
     if url.scheme.toLower() == "https":
       when defined(ssl):
@@ -819,7 +828,26 @@ proc get*(client: AsyncHttpClient, url: string): Future[Response] {.async.} =
     if result.status.redirection():
       let redirectTo = getNewLocation(lastURL, result.headers)
       result = await client.request(redirectTo, httpGET)
-      lastUrl = redirectTo
+      lastURL = redirectTo
+
+proc post*(client: AsyncHttpClient, url: string, body = "", multipart: MultipartData = nil): Future[Response] {.async.} =
+  ## Connects to the hostname specified by the URL and performs a POST request.
+  ##
+  ## This procedure will follow redirects up to a maximum number of redirects
+  ## specified in ``newAsyncHttpClient``.
+  let (mpHeader, mpBody) = format(multipart)
+
+  template withNewLine(x): expr =
+    if x.len > 0 and not x.endsWith("\c\L"):
+      x & "\c\L"
+    else:
+      x
+  var xb = mpBody.withNewLine() & body
+  if multipart != nil:
+    client.headers["Content-Type"] = mpHeader.split(": ")[1]
+  client.headers["Content-Length"] = $len(xb)
+
+  result = await client.request(url, httpPOST, xb)
 
 when not defined(testing) and isMainModule:
   when true:

@@ -23,6 +23,31 @@ __clang__
 #ifndef NIMBASE_H
 #define NIMBASE_H
 
+/* ------------ ignore typical warnings in Nim-generated files ------------- */
+#if defined(__GNUC__) || defined(__clang__)
+#  pragma GCC diagnostic ignored "-Wpragmas"
+#  pragma GCC diagnostic ignored "-Wwritable-strings"
+#  pragma GCC diagnostic ignored "-Winvalid-noreturn"
+#  pragma GCC diagnostic ignored "-Wformat"
+#  pragma GCC diagnostic ignored "-Wlogical-not-parentheses"
+#  pragma GCC diagnostic ignored "-Wlogical-op-parentheses"
+#  pragma GCC diagnostic ignored "-Wshadow"
+#  pragma GCC diagnostic ignored "-Wunused-function"
+#  pragma GCC diagnostic ignored "-Wunused-variable"
+#  pragma GCC diagnostic ignored "-Winvalid-offsetof"
+#  pragma GCC diagnostic ignored "-Wtautological-compare"
+#  pragma GCC diagnostic ignored "-Wswitch-bool"
+#  pragma GCC diagnostic ignored "-Wmacro-redefined"
+#  pragma GCC diagnostic ignored "-Wincompatible-pointer-types-discards-qualifiers"
+#endif
+
+#if defined(_MSC_VER)
+#  pragma warning(disable: 4005 4100 4101 4189 4191 4200 4244 4293 4296 4309)
+#  pragma warning(disable: 4310 4365 4456 4477 4514 4574 4611 4668 4702 4706)
+#  pragma warning(disable: 4710 4711 4774 4800 4820 4996)
+#endif
+/* ------------------------------------------------------------------------- */
+
 #if defined(__GNUC__)
 #  define _GNU_SOURCE 1
 #endif
@@ -110,18 +135,31 @@ __clang__
 #  endif
 #  define N_LIB_IMPORT  extern __declspec(dllimport)
 #else
-#  define N_CDECL(rettype, name) rettype name
-#  define N_STDCALL(rettype, name) rettype name
-#  define N_SYSCALL(rettype, name) rettype name
-#  define N_FASTCALL(rettype, name) rettype name
-#  define N_SAFECALL(rettype, name) rettype name
-/* function pointers with calling convention: */
-#  define N_CDECL_PTR(rettype, name) rettype (*name)
-#  define N_STDCALL_PTR(rettype, name) rettype (*name)
-#  define N_SYSCALL_PTR(rettype, name) rettype (*name)
-#  define N_FASTCALL_PTR(rettype, name) rettype (*name)
-#  define N_SAFECALL_PTR(rettype, name) rettype (*name)
-
+#  if defined(__GNUC__)
+#    define N_CDECL(rettype, name) rettype name
+#    define N_STDCALL(rettype, name) rettype name
+#    define N_SYSCALL(rettype, name) rettype name
+#    define N_FASTCALL(rettype, name) __attribute__((fastcall)) rettype name
+#    define N_SAFECALL(rettype, name) rettype name
+/*   function pointers with calling convention: */
+#    define N_CDECL_PTR(rettype, name) rettype (*name)
+#    define N_STDCALL_PTR(rettype, name) rettype (*name)
+#    define N_SYSCALL_PTR(rettype, name) rettype (*name)
+#    define N_FASTCALL_PTR(rettype, name) __attribute__((fastcall)) rettype (*name)
+#    define N_SAFECALL_PTR(rettype, name) rettype (*name)
+#  else
+#    define N_CDECL(rettype, name) rettype name
+#    define N_STDCALL(rettype, name) rettype name
+#    define N_SYSCALL(rettype, name) rettype name
+#    define N_FASTCALL(rettype, name) rettype name
+#    define N_SAFECALL(rettype, name) rettype name
+/*   function pointers with calling convention: */
+#    define N_CDECL_PTR(rettype, name) rettype (*name)
+#    define N_STDCALL_PTR(rettype, name) rettype (*name)
+#    define N_SYSCALL_PTR(rettype, name) rettype (*name)
+#    define N_FASTCALL_PTR(rettype, name) rettype (*name)
+#    define N_SAFECALL_PTR(rettype, name) rettype (*name)
+#  endif
 #  ifdef __cplusplus
 #    define N_LIB_EXPORT  extern "C"
 #  else
@@ -147,9 +185,15 @@ __clang__
 #if defined(__BORLANDC__) || defined(__WATCOMC__) || \
     defined(__POCC__) || defined(_MSC_VER) || defined(WIN32) || defined(_WIN32)
 /* these compilers have a fastcall so use it: */
-#  define N_NIMCALL(rettype, name) rettype __fastcall name
-#  define N_NIMCALL_PTR(rettype, name) rettype (__fastcall *name)
-#  define N_RAW_NIMCALL __fastcall
+#  ifdef __TINYC__
+#    define N_NIMCALL(rettype, name) rettype __attribute((__fastcall)) name
+#    define N_NIMCALL_PTR(rettype, name) rettype (__attribute((__fastcall)) *name)
+#    define N_RAW_NIMCALL __attribute((__fastcall))
+#  else
+#    define N_NIMCALL(rettype, name) rettype __fastcall name
+#    define N_NIMCALL_PTR(rettype, name) rettype (__fastcall *name)
+#    define N_RAW_NIMCALL __fastcall
+#  endif
 #else
 #  define N_NIMCALL(rettype, name) rettype name /* no modifier */
 #  define N_NIMCALL_PTR(rettype, name) rettype (*name)
@@ -347,7 +391,7 @@ struct TFrame {
   FR.procname = proc; FR.filename = file; FR.line = 0; FR.len = 0; nimFrame(&FR);
 
 #define nimfrs(proc, file, slots, length) \
-  struct {TFrame* prev;NCSTRING procname;NI line;NCSTRING filename; NI len; TVarSlot s[slots];} FR; \
+  struct {TFrame* prev;NCSTRING procname;NI line;NCSTRING filename; NI len; VarSlot s[slots];} FR; \
   FR.procname = proc; FR.filename = file; FR.line = 0; FR.len = length; nimFrame((TFrame*)&FR);
 
 #define nimln(n, file) \

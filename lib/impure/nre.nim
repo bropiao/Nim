@@ -1,6 +1,6 @@
 #
 #            Nim's Runtime Library
-#        (c) Copyright 2015 Nim Contributers
+#        (c) Copyright 2015 Nim Contributors
 #
 #    See the file "copying.txt", included in this
 #    distribution, for details about the copyright.
@@ -10,7 +10,6 @@
 from pcre import nil
 import nre.private.util
 import tables
-import unsigned
 from strutils import toLower, `%`
 from math import ceil
 import options
@@ -509,7 +508,7 @@ iterator findIter*(str: string, pattern: Regex, start = 0, endpos = int.high): R
   ## Variants:
   ##
   ## -  ``proc findAll(...)`` returns a ``seq[string]``
-  # see pcredemo for explaination
+  # see pcredemo for explanation
   let matchesCrLf = pattern.matchesCrLf()
   let unicode = uint32(getinfo[culong](pattern, pcre.INFO_OPTIONS) and
     pcre.UTF8) > 0u32
@@ -586,9 +585,12 @@ proc split*(str: string, pattern: Regex, maxSplit = -1, start = 0): seq[string] 
   result = @[]
   var lastIdx = start
   var splits = 0
-  var bounds = 0 .. 0
+  var bounds = 0 .. -1
+  var never_ran = true
 
   for match in str.findIter(pattern, start = start):
+    never_ran = false
+
     # bounds are inclusive:
     #
     # 0123456
@@ -615,7 +617,8 @@ proc split*(str: string, pattern: Regex, maxSplit = -1, start = 0): seq[string] 
   # "12".split("\b") would be @["1", "2", ""], but
   # if we skip an empty last match, it's the correct
   # @["1", "2"]
-  if bounds.a <= bounds.b or bounds.b < str.high:
+  # If matches were never found, then the input string is the result
+  if bounds.a <= bounds.b or bounds.b < str.high or never_ran:
     # last match: Each match takes the previous substring,
     # but "1 2".split(/ /) needs to return @["1", "2"].
     # This handles "2"

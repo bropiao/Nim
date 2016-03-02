@@ -11,7 +11,7 @@ include "system/inclrtl"
 
 import os, oids, tables, strutils, macros, times
 
-import rawsockets, net
+import nativesockets, net
 
 export Port, SocketFlag
 
@@ -122,10 +122,11 @@ export Port, SocketFlag
 ## Limitations/Bugs
 ## ----------------
 ##
-## * ``except`` statement (without `try`) does not work inside async procedures.
 ## * The effect system (``raises: []``) does not work with async procedures.
 ## * Can't await in a ``except`` body
-
+## * Forward declarations for async procs are broken,
+##   link includes workaround: https://github.com/nim-lang/Nim/issues/3182.
+## * FutureVar[T] needs to be completed manually.
 
 # TODO: Check if yielded future is nil and throw a more meaningful exception
 
@@ -145,10 +146,15 @@ type
   Future*[T] = ref object of FutureBase ## Typed future.
     value: T ## Stored value
 
+  FutureVar*[T] = distinct Future[T]
+
+  FutureError* = object of Exception
+    cause*: FutureBase
+
 {.deprecated: [PFutureBase: FutureBase, PFuture: Future].}
 
-
-var currentID = 0
+when not defined(release):
+  var currentID = 0
 proc newFuture*[T](fromProc: string = "unspecified"): Future[T] =
   ## Creates a new future.
   ##
@@ -162,18 +168,39 @@ proc newFuture*[T](fromProc: string = "unspecified"): Future[T] =
     result.fromProc = fromProc
     currentID.inc()
 
+proc newFutureVar*[T](fromProc = "unspecified"): FutureVar[T] =
+  ## Create a new ``FutureVar``. This Future type is ideally suited for
+  ## situations where you want to avoid unnecessary allocations of Futures.
+  ##
+  ## Specifying ``fromProc``, which is a string specifying the name of the proc
+  ## that this future belongs to, is a good habit as it helps with debugging.
+  result = FutureVar[T](newFuture[T](fromProc))
+
+proc clean*[T](future: FutureVar[T]) =
+  ## Resets the ``finished`` status of ``future``.
+  Future[T](future).finished = false
+  Future[T](future).error = nil
+
 proc checkFinished[T](future: Future[T]) =
+  ## Checks whether `future` is finished. If it is then raises a
+  ## ``FutureError``.
   when not defined(release):
     if future.finished:
-      echo("<-----> ", future.id, " ", future.fromProc)
-      echo(future.stackTrace)
-      echo("-----")
+      var msg = ""
+      msg.add("An attempt was made to complete a Future more than once. ")
+      msg.add("Details:")
+      msg.add("\n  Future ID: " & $future.id)
+      msg.add("\n  Created in proc: " & future.fromProc)
+      msg.add("\n  Stack trace to moment of creation:")
+      msg.add("\n" & indent(future.stackTrace.strip(), 4))
       when T is string:
-        echo("Contents: ", future.value.repr)
-      echo("<----->")
-      echo("Future already finished, cannot finish twice.")
-      echo getStackTrace()
-      assert false
+        msg.add("\n  Contents (string): ")
+        msg.add("\n" & indent(future.value.repr, 4))
+      msg.add("\n  Stack trace to moment of secondary completion:")
+      msg.add("\n" & indent(getStackTrace().strip(), 4))
+      var err = newException(FutureError, msg)
+      err.cause = future
+      raise err
 
 proc complete*[T](future: Future[T], val: T) =
   ## Completes ``future`` with value ``val``.
@@ -193,6 +220,15 @@ proc complete*(future: Future[void]) =
   future.finished = true
   if future.cb != nil:
     future.cb()
+
+proc complete*[T](future: FutureVar[T]) =
+  ## Completes a ``FutureVar``.
+  template fut: expr = Future[T](future)
+  checkFinished(fut)
+  assert(fut.error == nil)
+  fut.finished = true
+  if fut.cb != nil:
+    fut.cb()
 
 proc fail*[T](future: Future[T], error: ref Exception) =
   ## Completes ``future`` with ``error``.
@@ -230,15 +266,17 @@ proc `callback=`*[T](future: Future[T],
   ## If future has already completed then ``cb`` will be called immediately.
   future.callback = proc () = cb(future)
 
-proc echoOriginalStackTrace[T](future: Future[T]) =
+proc injectStacktrace[T](future: Future[T]) =
   # TODO: Come up with something better.
   when not defined(release):
-    echo("Original stack trace in ", future.fromProc, ":")
+    var msg = ""
+    msg.add("\n  " & future.fromProc & "'s lead up to read of failed Future:")
+
     if not future.errorStackTrace.isNil and future.errorStackTrace != "":
-      echo(future.errorStackTrace)
+      msg.add("\n" & indent(future.errorStackTrace.strip(), 4))
     else:
-      echo("Empty or nil stack trace.")
-    echo("Continuing...")
+      msg.add("\n    Empty or nil stack trace.")
+    future.error.msg.add(msg)
 
 proc read*[T](future: Future[T]): T =
   ## Retrieves the value of ``future``. Future must be finished otherwise
@@ -247,7 +285,7 @@ proc read*[T](future: Future[T]): T =
   ## If the result of the future is an error then that error will be raised.
   if future.finished:
     if future.error != nil:
-      echoOriginalStackTrace(future)
+      injectStacktrace(future)
       raise future.error
     when T isnot void:
       return future.value
@@ -263,6 +301,13 @@ proc readError*[T](future: Future[T]): ref Exception =
   if future.error != nil: return future.error
   else:
     raise newException(ValueError, "No error in future.")
+
+proc mget*[T](future: FutureVar[T]): var T =
+  ## Returns a mutable value stored in ``future``.
+  ##
+  ## Unlike ``read``, this function will not raise an exception if the
+  ## Future has not been finished.
+  result = Future[T](future).value
 
 proc finished*[T](future: Future[T]): bool =
   ## Determines whether ``future`` has completed.
@@ -282,7 +327,7 @@ proc asyncCheck*[T](future: Future[T]) =
   future.callback =
     proc () =
       if future.failed:
-        echoOriginalStackTrace(future)
+        injectStacktrace(future)
         raise future.error
 
 proc `and`*[T, Y](fut1: Future[T], fut2: Future[Y]): Future[void] =
@@ -334,7 +379,7 @@ when defined(windows) or defined(nimdoc):
       ioPort: Handle
       handles: HashSet[AsyncFD]
 
-    CustomOverlapped = object of TOVERLAPPED
+    CustomOverlapped = object of OVERLAPPED
       data*: CompletionData
 
     PCustomOverlapped* = ref CustomOverlapped
@@ -421,16 +466,16 @@ when defined(windows) or defined(nimdoc):
   var acceptExPtr: pointer = nil
   var getAcceptExSockAddrsPtr: pointer = nil
 
-  proc initPointer(s: SocketHandle, fun: var pointer, guid: var TGUID): bool =
+  proc initPointer(s: SocketHandle, fun: var pointer, guid: var GUID): bool =
     # Ref: https://github.com/powdahound/twisted/blob/master/twisted/internet/iocpreactor/iocpsupport/winsock_pointers.c
     var bytesRet: Dword
     fun = nil
     result = WSAIoctl(s, SIO_GET_EXTENSION_FUNCTION_POINTER, addr guid,
-                      sizeof(TGUID).Dword, addr fun, sizeof(pointer).Dword,
+                      sizeof(GUID).Dword, addr fun, sizeof(pointer).Dword,
                       addr bytesRet, nil, nil) == 0
 
   proc initAll() =
-    let dummySock = newRawSocket()
+    let dummySock = newNativeSocket()
     if not initPointer(dummySock, connectExPtr, WSAID_CONNECTEX):
       raiseOSError(osLastError())
     if not initPointer(dummySock, acceptExPtr, WSAID_ACCEPTEX):
@@ -483,7 +528,7 @@ when defined(windows) or defined(nimdoc):
                   RemoteSockaddr, RemoteSockaddrLength)
 
   proc connect*(socket: AsyncFD, address: string, port: Port,
-    af = AF_INET): Future[void] =
+    domain = nativesockets.AF_INET): Future[void] =
     ## Connects ``socket`` to server at ``address:port``.
     ##
     ## Returns a ``Future`` which will complete when the connection succeeds
@@ -492,14 +537,14 @@ when defined(windows) or defined(nimdoc):
     var retFuture = newFuture[void]("connect")
     # Apparently ``ConnectEx`` expects the socket to be initially bound:
     var saddr: Sockaddr_in
-    saddr.sin_family = int16(toInt(af))
+    saddr.sin_family = int16(toInt(domain))
     saddr.sin_port = 0
     saddr.sin_addr.s_addr = INADDR_ANY
     if bindAddr(socket.SocketHandle, cast[ptr SockAddr](addr(saddr)),
                   sizeof(saddr).SockLen) < 0'i32:
       raiseOSError(osLastError())
 
-    var aiList = getAddrInfo(address, port, af)
+    var aiList = getAddrInfo(address, port, domain)
     var success = false
     var lastError: OSErrorCode
     var it = aiList
@@ -566,7 +611,7 @@ when defined(windows) or defined(nimdoc):
     var retFuture = newFuture[string]("recv")
     var dataBuf: TWSABuf
     dataBuf.buf = cast[cstring](alloc0(size))
-    dataBuf.len = size
+    dataBuf.len = size.ULONG
 
     var bytesReceived: Dword
     var flagsio = flags.toOSFlags().Dword
@@ -661,7 +706,7 @@ when defined(windows) or defined(nimdoc):
     #buf[] = '\0'
     var dataBuf: TWSABuf
     dataBuf.buf = buf
-    dataBuf.len = size
+    dataBuf.len = size.ULONG
 
     var bytesReceived: Dword
     var flagsio = flags.toOSFlags().Dword
@@ -732,7 +777,7 @@ when defined(windows) or defined(nimdoc):
 
     var dataBuf: TWSABuf
     dataBuf.buf = data # since this is not used in a callback, this is fine
-    dataBuf.len = data.len
+    dataBuf.len = data.len.ULONG
 
     var bytesReceived, lowFlags: Dword
     var ol = PCustomOverlapped()
@@ -782,7 +827,7 @@ when defined(windows) or defined(nimdoc):
     verifyPresence(socket)
     var retFuture = newFuture[tuple[address: string, client: AsyncFD]]("acceptAddr")
 
-    var clientSock = newRawSocket()
+    var clientSock = newNativeSocket()
     if clientSock == osInvalidSocket: raiseOSError(osLastError())
 
     const lpOutputLen = 1024
@@ -855,17 +900,17 @@ when defined(windows) or defined(nimdoc):
 
     return retFuture
 
-  proc newAsyncRawSocket*(domain, typ, protocol: cint): AsyncFD =
+  proc newAsyncNativeSocket*(domain, sockType, protocol: cint): AsyncFD =
     ## Creates a new socket and registers it with the dispatcher implicitly.
-    result = newRawSocket(domain, typ, protocol).AsyncFD
+    result = newNativeSocket(domain, sockType, protocol).AsyncFD
     result.SocketHandle.setBlocking(false)
     register(result)
 
-  proc newAsyncRawSocket*(domain: Domain = AF_INET,
-               typ: SockType = SOCK_STREAM,
-               protocol: Protocol = IPPROTO_TCP): AsyncFD =
+  proc newAsyncNativeSocket*(domain: Domain = nativesockets.AF_INET,
+                             sockType: SockType = SOCK_STREAM,
+                             protocol: Protocol = IPPROTO_TCP): AsyncFD =
     ## Creates a new socket and registers it with the dispatcher implicitly.
-    result = newRawSocket(domain, typ, protocol).AsyncFD
+    result = newNativeSocket(domain, sockType, protocol).AsyncFD
     result.SocketHandle.setBlocking(false)
     register(result)
 
@@ -921,33 +966,34 @@ else:
   proc update(fd: AsyncFD, events: set[Event]) =
     let p = getGlobalDispatcher()
     assert fd.SocketHandle in p.selector
-    discard p.selector.update(fd.SocketHandle, events)
+    p.selector.update(fd.SocketHandle, events)
 
   proc register*(fd: AsyncFD) =
     let p = getGlobalDispatcher()
     var data = PData(fd: fd, readCBs: @[], writeCBs: @[])
     p.selector.register(fd.SocketHandle, {}, data.RootRef)
 
-  proc newAsyncRawSocket*(domain: cint, typ: cint, protocol: cint): AsyncFD =
-    result = newRawSocket(domain, typ, protocol).AsyncFD
+  proc newAsyncNativeSocket*(domain: cint, sockType: cint,
+                             protocol: cint): AsyncFD =
+    result = newNativeSocket(domain, sockType, protocol).AsyncFD
     result.SocketHandle.setBlocking(false)
     when defined(macosx):
-        result.SocketHandle.setSockOptInt(SOL_SOCKET, SO_NOSIGPIPE, 1)
+      result.SocketHandle.setSockOptInt(SOL_SOCKET, SO_NOSIGPIPE, 1)
     register(result)
 
-  proc newAsyncRawSocket*(domain: Domain = AF_INET,
-               typ: SockType = SOCK_STREAM,
-               protocol: Protocol = IPPROTO_TCP): AsyncFD =
-    result = newRawSocket(domain, typ, protocol).AsyncFD
+  proc newAsyncNativeSocket*(domain: Domain = AF_INET,
+                             sockType: SockType = SOCK_STREAM,
+                             protocol: Protocol = IPPROTO_TCP): AsyncFD =
+    result = newNativeSocket(domain, sockType, protocol).AsyncFD
     result.SocketHandle.setBlocking(false)
     when defined(macosx):
-        result.SocketHandle.setSockOptInt(SOL_SOCKET, SO_NOSIGPIPE, 1)
+      result.SocketHandle.setSockOptInt(SOL_SOCKET, SO_NOSIGPIPE, 1)
     register(result)
 
   proc closeSocket*(sock: AsyncFD) =
     let disp = getGlobalDispatcher()
-    sock.SocketHandle.close()
     disp.selector.unregister(sock.SocketHandle)
+    sock.SocketHandle.close()
 
   proc unregister*(fd: AsyncFD) =
     getGlobalDispatcher().selector.unregister(fd.SocketHandle)
@@ -972,9 +1018,9 @@ else:
       let data = PData(info.key.data)
       assert data.fd == info.key.fd.AsyncFD
       #echo("In poll ", data.fd.cint)
-      if EvError in info.events:
-        closeSocket(data.fd)
-        continue
+      # There may be EvError here, but we handle them in callbacks,
+      # so that exceptions can be raised from `send(...)` and
+      # `recv(...)` routines.
 
       if EvRead in info.events:
         # Callback may add items to ``data.readCBs`` which causes issues if
@@ -1009,15 +1055,24 @@ else:
     processTimers(p)
 
   proc connect*(socket: AsyncFD, address: string, port: Port,
-    af = AF_INET): Future[void] =
+    domain = AF_INET): Future[void] =
     var retFuture = newFuture[void]("connect")
 
     proc cb(fd: AsyncFD): bool =
-      # We have connected.
-      retFuture.complete()
-      return true
+      var ret = SocketHandle(fd).getSockOptInt(cint(SOL_SOCKET), cint(SO_ERROR))
+      if ret == 0:
+          # We have connected.
+          retFuture.complete()
+          return true
+      elif ret == EINTR:
+          # interrupted, keep waiting
+          return false
+      else:
+          retFuture.fail(newException(OSError, osErrorMsg(OSErrorCode(ret))))
+          return true
 
-    var aiList = getAddrInfo(address, port, af)
+    assert getSockDomain(socket.SocketHandle) == domain
+    var aiList = getAddrInfo(address, port, domain)
     var success = false
     var lastError: OSErrorCode
     var it = aiList
@@ -1135,7 +1190,7 @@ else:
         client: AsyncFD]]("acceptAddr")
     proc cb(sock: AsyncFD): bool =
       result = true
-      var sockAddress: SockAddr_in
+      var sockAddress: Sockaddr_storage
       var addrLen = sizeof(sockAddress).Socklen
       var client = accept(sock.SocketHandle,
                           cast[ptr SockAddr](addr(sockAddress)), addr(addrLen))
@@ -1151,7 +1206,7 @@ else:
             retFuture.fail(newException(OSError, osErrorMsg(lastError)))
       else:
         register(client.AsyncFD)
-        retFuture.complete(($inet_ntoa(sockAddress.sin_addr), client.AsyncFD))
+        retFuture.complete((getAddrString(cast[ptr SockAddr](addr sockAddress)), client.AsyncFD))
     addRead(socket, cb)
     return retFuture
 
@@ -1403,26 +1458,35 @@ proc getName(node: NimNode): string {.compileTime.} =
   else:
     error("Unknown name.")
 
-macro async*(prc: stmt): stmt {.immediate.} =
-  ## Macro which processes async procedures into the appropriate
-  ## iterators and yield statements.
+proc asyncSingleProc(prc: NimNode): NimNode {.compileTime.} =
+  ## This macro transforms a single procedure into a closure iterator.
+  ## The ``async`` macro supports a stmtList holding multiple async procedures.
   if prc.kind notin {nnkProcDef, nnkLambda}:
-    error("Cannot transform this node kind into an async proc." &
-          " Proc definition or lambda node expected.")
+      error("Cannot transform this node kind into an async proc." &
+            " Proc definition or lambda node expected.")
 
   hint("Processing " & prc[0].getName & " as an async proc.")
 
   let returnType = prc[3][0]
+  var baseType: NimNode
   # Verify that the return type is a Future[T]
-  if returnType.kind == nnkIdent:
-    error("Expected return type of 'Future' got '" & $returnType & "'")
-  elif returnType.kind == nnkBracketExpr:
-    if $returnType[0] != "Future":
-      error("Expected return type of 'Future' got '" & $returnType[0] & "'")
+  if returnType.kind == nnkBracketExpr:
+    let fut = repr(returnType[0])
+    if fut != "Future":
+      error("Expected return type of 'Future' got '" & fut & "'")
+    baseType = returnType[1]
+  elif returnType.kind in nnkCallKinds and $returnType[0] == "[]":
+    let fut = repr(returnType[1])
+    if fut != "Future":
+      error("Expected return type of 'Future' got '" & fut & "'")
+    baseType = returnType[2]
+  elif returnType.kind == nnkEmpty:
+    baseType = returnType
+  else:
+    error("Expected return type of 'Future' got '" & repr(returnType) & "'")
 
   let subtypeIsVoid = returnType.kind == nnkEmpty or
-        (returnType.kind == nnkBracketExpr and
-         returnType[1].kind == nnkIdent and returnType[1].ident == !"void")
+        (baseType.kind == nnkIdent and returnType[1].ident == !"void")
 
   var outerProcBody = newNimNode(nnkStmtList, prc[6])
 
@@ -1430,7 +1494,7 @@ macro async*(prc: stmt): stmt {.immediate.} =
   var retFutureSym = genSym(nskVar, "retFuture")
   var subRetType =
     if returnType.kind == nnkEmpty: newIdentNode("void")
-    else: returnType[1]
+    else: baseType
   outerProcBody.add(
     newVarStmt(retFutureSym,
       newCall(
@@ -1454,7 +1518,7 @@ macro async*(prc: stmt): stmt {.immediate.} =
       newIdentNode("off")))) # -> {.push warning[resultshadowed]: off.}
 
     procBody.insert(1, newNimNode(nnkVarSection, prc[6]).add(
-      newIdentDefs(newIdentNode("result"), returnType[1]))) # -> var result: T
+      newIdentDefs(newIdentNode("result"), baseType))) # -> var result: T
 
     procBody.insert(2, newNimNode(nnkPragma).add(
       newIdentNode("pop"))) # -> {.pop.})
@@ -1495,8 +1559,18 @@ macro async*(prc: stmt): stmt {.immediate.} =
   result[6] = outerProcBody
 
   #echo(treeRepr(result))
-  #if prc[0].getName == "test":
+  #if prc[0].getName == "hubConnectionLoop":
   #  echo(toStrLit(result))
+
+macro async*(prc: stmt): stmt {.immediate.} =
+  ## Macro which processes async procedures into the appropriate
+  ## iterators and yield statements.
+  if prc.kind == nnkStmtList:
+    for oneProc in prc:
+      result = newStmtList()
+      result.add asyncSingleProc(oneProc)
+  else:
+    result = asyncSingleProc(prc)
 
 proc recvLine*(socket: AsyncFD): Future[string] {.async.} =
   ## Reads a line of data from ``socket``. Returned future will complete once

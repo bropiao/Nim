@@ -68,32 +68,90 @@
 import
   hashes, math
 
-{.pragma: myShallow.}
+include "system/inclrtl"
 
 type
   KeyValuePair[A, B] = tuple[hcode: Hash, key: A, val: B]
   KeyValuePairSeq[A, B] = seq[KeyValuePair[A, B]]
-  Table* {.myShallow.}[A, B] = object ## generic hash table
+  Table*[A, B] = object ## generic hash table
     data: KeyValuePairSeq[A, B]
     counter: int
   TableRef*[A,B] = ref Table[A, B]
 
 {.deprecated: [TTable: Table, PTable: TableRef].}
 
-when not defined(nimhygiene):
-  {.pragma: dirty.}
+template maxHash(t): expr {.immediate.} = high(t.data)
+template dataLen(t): expr = len(t.data)
 
-# hcode for real keys cannot be zero.  hcode==0 signifies an empty slot.  These
-# two procs retain clarity of that encoding without the space cost of an enum.
-proc isEmpty(hcode: Hash): bool {.inline.} =
-  result = hcode == 0
+include tableimpl
 
-proc isFilled(hcode: Hash): bool {.inline.} =
-  result = hcode != 0
+proc rightSize*(count: Natural): int {.inline.} =
+  ## Return the value of `initialSize` to support `count` items.
+  ##
+  ## If more items are expected to be added, simply add that
+  ## expected extra amount to the parameter before calling this.
+  ##
+  ## Internally, we want mustRehash(rightSize(x), x) == false.
+  result = nextPowerOfTwo(count * 3 div 2  +  4)
 
 proc len*[A, B](t: Table[A, B]): int =
   ## returns the number of keys in `t`.
   result = t.counter
+
+template get(t, key): untyped {.immediate.} =
+  ## retrieves the value at ``t[key]``. The value can be modified.
+  ## If `key` is not in `t`, the ``KeyError`` exception is raised.
+  mixin rawGet
+  var hc: Hash
+  var index = rawGet(t, key, hc)
+  if index >= 0: result = t.data[index].val
+  else:
+    when compiles($key):
+      raise newException(KeyError, "key not found: " & $key)
+    else:
+      raise newException(KeyError, "key not found")
+
+template getOrDefaultImpl(t, key): untyped {.immediate.} =
+  mixin rawGet
+  var hc: Hash
+  var index = rawGet(t, key, hc)
+  if index >= 0: result = t.data[index].val
+
+proc `[]`*[A, B](t: Table[A, B], key: A): B {.deprecatedGet.} =
+  ## retrieves the value at ``t[key]``. If `key` is not in `t`, the
+  ## ``KeyError`` exception is raised. One can check with ``hasKey`` whether
+  ## the key exists.
+  get(t, key)
+
+proc `[]`*[A, B](t: var Table[A, B], key: A): var B {.deprecatedGet.} =
+  ## retrieves the value at ``t[key]``. The value can be modified.
+  ## If `key` is not in `t`, the ``KeyError`` exception is raised.
+  get(t, key)
+
+proc mget*[A, B](t: var Table[A, B], key: A): var B {.deprecated.} =
+  ## retrieves the value at ``t[key]``. The value can be modified.
+  ## If `key` is not in `t`, the ``KeyError`` exception is raised. Use ```[]```
+  ## instead.
+  get(t, key)
+
+proc getOrDefault*[A, B](t: Table[A, B], key: A): B = getOrDefaultImpl(t, key)
+
+iterator allValues*[A, B](t: Table[A, B]; key: A): B =
+  ## iterates over any value in the table `t` that belongs to the given `key`.
+  var h: Hash = hash(key) and high(t.data)
+  while isFilled(t.data[h].hcode):
+    if t.data[h].key == key:
+      yield t.data[h].val
+    h = nextTry(h, high(t.data))
+
+proc hasKey*[A, B](t: Table[A, B], key: A): bool =
+  ## returns true iff `key` is in the table `t`.
+  var hc: Hash
+  result = rawGet(t, key, hc) >= 0
+
+proc contains*[A, B](t: Table[A, B], key: A): bool =
+  ## alias of `hasKey` for use with the `in` operator.
+  return hasKey[A, B](t, key)
 
 iterator pairs*[A, B](t: Table[A, B]): (A, B) =
   ## iterates over any (key, value) pair in the table `t`.
@@ -121,107 +179,9 @@ iterator mvalues*[A, B](t: var Table[A, B]): var B =
   for h in 0..high(t.data):
     if isFilled(t.data[h].hcode): yield t.data[h].val
 
-const
-  growthFactor = 2
-
-proc mustRehash(length, counter: int): bool {.inline.} =
-  assert(length > counter)
-  result = (length * 2 < counter * 3) or (length - counter < 4)
-
-proc rightSize*(count: Natural): int {.inline.} =
-  ## Return the value of `initialSize` to support `count` items.
-  ##
-  ## If more items are expected to be added, simply add that
-  ## expected extra amount to the parameter before calling this.
-  ##
-  ## Internally, we want mustRehash(rightSize(x), x) == false.
-  result = nextPowerOfTwo(count * 3 div 2  +  4)
-
-proc nextTry(h, maxHash: Hash): Hash {.inline.} =
-  result = (h + 1) and maxHash
-
-template rawGetKnownHCImpl() {.dirty.} =
-  var h: Hash = hc and high(t.data)   # start with real hash value
-  while isFilled(t.data[h].hcode):
-    # Compare hc THEN key with boolean short circuit. This makes the common case
-    # zero ==key's for missing (e.g.inserts) and exactly one ==key for present.
-    # It does slow down succeeding lookups by one extra Hash cmp&and..usually
-    # just a few clock cycles, generally worth it for any non-integer-like A.
-    if t.data[h].hcode == hc and t.data[h].key == key:
-      return h
-    h = nextTry(h, high(t.data))
-  result = -1 - h                   # < 0 => MISSING; insert idx = -1 - result
-
-template rawGetImpl() {.dirty.} =
-  hc = hash(key)
-  if hc == 0:       # This almost never taken branch should be very predictable.
-    hc = 314159265  # Value doesn't matter; Any non-zero favorite is fine.
-  rawGetKnownHCImpl()
-
-template rawGetDeepImpl() {.dirty.} =   # Search algo for unconditional add
-  hc = hash(key)
-  if hc == 0:
-    hc = 314159265
-  var h: Hash = hc and high(t.data)
-  while isFilled(t.data[h].hcode):
-    h = nextTry(h, high(t.data))
-  result = h
-
-template rawInsertImpl() {.dirty.} =
-  data[h].key = key
-  data[h].val = val
-  data[h].hcode = hc
-
-proc rawGetKnownHC[A, B](t: Table[A, B], key: A, hc: Hash): int {.inline.} =
-  rawGetKnownHCImpl()
-
-proc rawGetDeep[A, B](t: Table[A, B], key: A, hc: var Hash): int {.inline.} =
-  rawGetDeepImpl()
-
-proc rawGet[A, B](t: Table[A, B], key: A, hc: var Hash): int {.inline.} =
-  rawGetImpl()
-
-proc `[]`*[A, B](t: Table[A, B], key: A): B =
-  ## retrieves the value at ``t[key]``. If `key` is not in `t`,
-  ## default empty value for the type `B` is returned
-  ## and no exception is raised. One can check with ``hasKey`` whether the key
-  ## exists.
-  var hc: Hash
-  var index = rawGet(t, key, hc)
-  if index >= 0: result = t.data[index].val
-
-proc mget*[A, B](t: var Table[A, B], key: A): var B =
-  ## retrieves the value at ``t[key]``. The value can be modified.
-  ## If `key` is not in `t`, the ``KeyError`` exception is raised.
-  var hc: Hash
-  var index = rawGet(t, key, hc)
-  if index >= 0: result = t.data[index].val
-  else:
-    when compiles($key):
-      raise newException(KeyError, "key not found: " & $key)
-    else:
-      raise newException(KeyError, "key not found")
-
-iterator allValues*[A, B](t: Table[A, B]; key: A): B =
-  ## iterates over any value in the table `t` that belongs to the given `key`.
-  var h: Hash = hash(key) and high(t.data)
-  while isFilled(t.data[h].hcode):
-    if t.data[h].key == key:
-      yield t.data[h].val
-    h = nextTry(h, high(t.data))
-
-proc hasKey*[A, B](t: Table[A, B], key: A): bool =
-  ## returns true iff `key` is in the table `t`.
-  var hc: Hash
-  result = rawGet(t, key, hc) >= 0
-
-proc contains*[A, B](t: Table[A, B], key: A): bool =
-  ## alias of `hasKey` for use with the `in` operator.
-  return hasKey[A, B](t, key)
-
-proc rawInsert[A, B](t: var Table[A, B], data: var KeyValuePairSeq[A, B],
-                     key: A, val: B, hc: Hash, h: Hash) =
-  rawInsertImpl()
+proc del*[A, B](t: var Table[A, B], key: A) =
+  ## deletes `key` from hash table `t`.
+  delImpl()
 
 proc enlarge[A, B](t: var Table[A, B]) =
   var n: KeyValuePairSeq[A, B]
@@ -232,81 +192,26 @@ proc enlarge[A, B](t: var Table[A, B]) =
       var j = -1 - rawGetKnownHC(t, n[i].key, n[i].hcode)
       rawInsert(t, t.data, n[i].key, n[i].val, n[i].hcode, j)
 
-template addImpl() {.dirty.} =
-  if mustRehash(len(t.data), t.counter): enlarge(t)
-  var hc: Hash
-  var j = rawGetDeep(t, key, hc)
-  rawInsert(t, t.data, key, val, hc, j)
-  inc(t.counter)
-
-template maybeRehashPutImpl() {.dirty.} =
-  if mustRehash(len(t.data), t.counter):
-    enlarge(t)
-    index = rawGetKnownHC(t, key, hc)
-  index = -1 - index                  # important to transform for mgetOrPutImpl
-  rawInsert(t, t.data, key, val, hc, index)
-  inc(t.counter)
-
-template putImpl() {.dirty.} =
-  var hc: Hash
-  var index = rawGet(t, key, hc)
-  if index >= 0: t.data[index].val = val
-  else: maybeRehashPutImpl()
-
-template mgetOrPutImpl() {.dirty.} =
-  var hc: Hash
-  var index = rawGet(t, key, hc)
-  if index < 0: maybeRehashPutImpl()    # not present: insert (flipping index)
-  result = t.data[index].val            # either way return modifiable val
-
-template hasKeyOrPutImpl() {.dirty.} =
-  var hc: Hash
-  var index = rawGet(t, key, hc)
-  if index < 0:
-    result = false
-    maybeRehashPutImpl()
-  else: result = true
-
 proc mgetOrPut*[A, B](t: var Table[A, B], key: A, val: B): var B =
   ## retrieves value at ``t[key]`` or puts ``val`` if not present, either way
   ## returning a value which can be modified.
-  mgetOrPutImpl()
+  mgetOrPutImpl(enlarge)
 
 proc hasKeyOrPut*[A, B](t: var Table[A, B], key: A, val: B): bool =
   ## returns true iff `key` is in the table, otherwise inserts `value`.
-  hasKeyOrPutImpl()
+  hasKeyOrPutImpl(enlarge)
 
 proc `[]=`*[A, B](t: var Table[A, B], key: A, val: B) =
   ## puts a (key, value)-pair into `t`.
-  putImpl()
+  putImpl(enlarge)
 
 proc add*[A, B](t: var Table[A, B], key: A, val: B) =
   ## puts a new (key, value)-pair into `t` even if ``t[key]`` already exists.
-  addImpl()
+  addImpl(enlarge)
 
-template doWhile(a: expr, b: stmt): stmt =
-  while true:
-    b
-    if not a: break
-
-proc del*[A, B](t: var Table[A, B], key: A) =
-  ## deletes `key` from hash table `t`.
-  var hc: Hash
-  var i = rawGet(t, key, hc)
-  let msk = high(t.data)
-  if i >= 0:
-    t.data[i].hcode = 0
-    dec(t.counter)
-    while true:         # KnuthV3 Algo6.4R adapted for i=i+1 instead of i=i-1
-      var j = i         # The correctness of this depends on (h+1) in nextTry,
-      var r = j         # though may be adaptable to other simple sequences.
-      t.data[i].hcode = 0              # mark current EMPTY
-      doWhile ((i >= r and r > j) or (r > j and j > i) or (j > i and i >= r)):
-        i = (i + 1) and msk            # increment mod table size
-        if isEmpty(t.data[i].hcode):   # end of collision cluster; So all done
-          return
-        r = t.data[i].hcode and msk    # "home" location of key@i
-      shallowCopy(t.data[j], t.data[i]) # data[j] will be marked EMPTY next loop
+proc len*[A, B](t: TableRef[A, B]): int =
+  ## returns the number of keys in `t`.
+  result = t.counter
 
 proc initTable*[A, B](initialSize=64): Table[A, B] =
   ## creates a new hash table that is empty.
@@ -340,6 +245,10 @@ proc `$`*[A, B](t: Table[A, B]): string =
   ## The `$` operator for hash tables.
   dollarImpl()
 
+proc hasKey*[A, B](t: TableRef[A, B], key: A): bool =
+  ## returns true iff `key` is in the table `t`.
+  result = t[].hasKey(key)
+
 template equalsImpl() =
   if s.counter == t.counter:
     # different insertion orders mean different 'data' seqs, so we have
@@ -359,10 +268,6 @@ proc indexBy*[A, B, C](collection: A, index: proc(x: B): C): Table[C, B] =
   result = initTable[C, B]()
   for item in collection:
     result[index(item)] = item
-
-proc len*[A, B](t: TableRef[A, B]): int =
-  ## returns the number of keys in `t`.
-  result = t.counter
 
 iterator pairs*[A, B](t: TableRef[A, B]): (A, B) =
   ## iterates over any (key, value) pair in the table `t`.
@@ -390,17 +295,19 @@ iterator mvalues*[A, B](t: TableRef[A, B]): var B =
   for h in 0..high(t.data):
     if isFilled(t.data[h].hcode): yield t.data[h].val
 
-proc `[]`*[A, B](t: TableRef[A, B], key: A): B =
-  ## retrieves the value at ``t[key]``. If `key` is not in `t`,
-  ## default empty value for the type `B` is returned
-  ## and no exception is raised. One can check with ``hasKey`` whether the key
-  ## exists.
+proc `[]`*[A, B](t: TableRef[A, B], key: A): var B {.deprecatedGet.} =
+  ## retrieves the value at ``t[key]``.  If `key` is not in `t`, the
+  ## ``KeyError`` exception is raised. One can check with ``hasKey`` whether
+  ## the key exists.
   result = t[][key]
 
-proc mget*[A, B](t: TableRef[A, B], key: A): var B =
+proc mget*[A, B](t: TableRef[A, B], key: A): var B {.deprecated.} =
   ## retrieves the value at ``t[key]``. The value can be modified.
-  ## If `key` is not in `t`, the ``EInvalidKey`` exception is raised.
-  t[].mget(key)
+  ## If `key` is not in `t`, the ``KeyError`` exception is raised.
+  ## Use ```[]``` instead.
+  t[][key]
+
+proc getOrDefault*[A, B](t: TableRef[A, B], key: A): B = getOrDefault(t[], key)
 
 proc mgetOrPut*[A, B](t: TableRef[A, B], key: A, val: B): var B =
   ## retrieves value at ``t[key]`` or puts ``val`` if not present, either way
@@ -410,10 +317,6 @@ proc mgetOrPut*[A, B](t: TableRef[A, B], key: A, val: B): var B =
 proc hasKeyOrPut*[A, B](t: var TableRef[A, B], key: A, val: B): bool =
   ## returns true iff `key` is in the table, otherwise inserts `value`.
   t[].hasKeyOrPut(key, val)
-
-proc hasKey*[A, B](t: TableRef[A, B], key: A): bool =
-  ## returns true iff `key` is in the table `t`.
-  result = t[].hasKey(key)
 
 proc contains*[A, B](t: TableRef[A, B], key: A): bool =
   ## alias of `hasKey` for use with the `in` operator.
@@ -462,8 +365,7 @@ type
   OrderedKeyValuePair[A, B] = tuple[
     hcode: Hash, next: int, key: A, val: B]
   OrderedKeyValuePairSeq[A, B] = seq[OrderedKeyValuePair[A, B]]
-  OrderedTable* {.
-      myShallow.}[A, B] = object ## table that remembers insertion order
+  OrderedTable* [A, B] = object ## table that remembers insertion order
     data: OrderedKeyValuePairSeq[A, B]
     counter, first, last: int
   OrderedTableRef*[A, B] = ref OrderedTable[A, B]
@@ -518,22 +420,26 @@ proc rawGetDeep[A, B](t: OrderedTable[A, B], key: A, hc: var Hash): int {.inline
 proc rawGet[A, B](t: OrderedTable[A, B], key: A, hc: var Hash): int =
   rawGetImpl()
 
-proc `[]`*[A, B](t: OrderedTable[A, B], key: A): B =
-  ## retrieves the value at ``t[key]``. If `key` is not in `t`,
-  ## default empty value for the type `B` is returned
-  ## and no exception is raised. One can check with ``hasKey`` whether the key
-  ## exists.
-  var hc: Hash
-  var index = rawGet(t, key, hc)
-  if index >= 0: result = t.data[index].val
+proc `[]`*[A, B](t: OrderedTable[A, B], key: A): B {.deprecatedGet.} =
+  ## retrieves the value at ``t[key]``. If `key` is not in `t`, the
+  ## ``KeyError`` exception is raised. One can check with ``hasKey`` whether
+  ## the key exists.
+  get(t, key)
 
-proc mget*[A, B](t: var OrderedTable[A, B], key: A): var B =
+proc `[]`*[A, B](t: var OrderedTable[A, B], key: A): var B{.deprecatedGet.} =
   ## retrieves the value at ``t[key]``. The value can be modified.
-  ## If `key` is not in `t`, the ``EInvalidKey`` exception is raised.
-  var hc: Hash
-  var index = rawGet(t, key, hc)
-  if index >= 0: result = t.data[index].val
-  else: raise newException(KeyError, "key not found: " & $key)
+  ## If `key` is not in `t`, the ``KeyError`` exception is raised.
+  get(t, key)
+
+proc mget*[A, B](t: var OrderedTable[A, B], key: A): var B {.deprecated.} =
+  ## retrieves the value at ``t[key]``. The value can be modified.
+  ## If `key` is not in `t`, the ``KeyError`` exception is raised.
+  ## Use ```[]``` instead.
+  get(t, key)
+
+proc getOrDefault*[A, B](t: OrderedTable[A, B], key: A): B =
+  getOrDefaultImpl(t, key)
+
 
 proc hasKey*[A, B](t: OrderedTable[A, B], key: A): bool =
   ## returns true iff `key` is in the table `t`.
@@ -569,20 +475,20 @@ proc enlarge[A, B](t: var OrderedTable[A, B]) =
 
 proc `[]=`*[A, B](t: var OrderedTable[A, B], key: A, val: B) =
   ## puts a (key, value)-pair into `t`.
-  putImpl()
+  putImpl(enlarge)
 
 proc add*[A, B](t: var OrderedTable[A, B], key: A, val: B) =
   ## puts a new (key, value)-pair into `t` even if ``t[key]`` already exists.
-  addImpl()
+  addImpl(enlarge)
 
 proc mgetOrPut*[A, B](t: var OrderedTable[A, B], key: A, val: B): var B =
   ## retrieves value at ``t[key]`` or puts ``value`` if not present, either way
   ## returning a value which can be modified.
-  mgetOrPutImpl()
+  mgetOrPutImpl(enlarge)
 
 proc hasKeyOrPut*[A, B](t: var OrderedTable[A, B], key: A, val: B): bool =
   ## returns true iff `key` is in the table, otherwise inserts `value`.
-  hasKeyOrPutImpl()
+  hasKeyOrPutImpl(enlarge)
 
 proc initOrderedTable*[A, B](initialSize=64): OrderedTable[A, B] =
   ## creates a new ordered hash table that is empty.
@@ -691,17 +597,20 @@ iterator mvalues*[A, B](t: OrderedTableRef[A, B]): var B =
   forAllOrderedPairs:
     yield t.data[h].val
 
-proc `[]`*[A, B](t: OrderedTableRef[A, B], key: A): B =
-  ## retrieves the value at ``t[key]``. If `key` is not in `t`,
-  ## default empty value for the type `B` is returned
-  ## and no exception is raised. One can check with ``hasKey`` whether the key
-  ## exists.
+proc `[]`*[A, B](t: OrderedTableRef[A, B], key: A): var B =
+  ## retrieves the value at ``t[key]``. If `key` is not in `t`, the
+  ## ``KeyError`` exception is raised. One can check with ``hasKey`` whether
+  ## the key exists.
   result = t[][key]
 
-proc mget*[A, B](t: OrderedTableRef[A, B], key: A): var B =
+proc mget*[A, B](t: OrderedTableRef[A, B], key: A): var B {.deprecated.} =
   ## retrieves the value at ``t[key]``. The value can be modified.
-  ## If `key` is not in `t`, the ``EInvalidKey`` exception is raised.
-  result = t[].mget(key)
+  ## If `key` is not in `t`, the ``KeyError`` exception is raised.
+  ## Use ```[]``` instead.
+  result = t[][key]
+
+proc getOrDefault*[A, B](t: OrderedTableRef[A, B], key: A): B =
+  getOrDefault(t[], key)
 
 proc mgetOrPut*[A, B](t: OrderedTableRef[A, B], key: A, val: B): var B =
   ## retrieves value at ``t[key]`` or puts ``val`` if not present, either way
@@ -757,7 +666,7 @@ proc sort*[A, B](t: OrderedTableRef[A, B],
 # ------------------------------ count tables -------------------------------
 
 type
-  CountTable* {.myShallow.}[
+  CountTable* [
       A] = object ## table that counts the number of each key
     data: seq[tuple[key: A, val: int]]
     counter: int
@@ -802,19 +711,35 @@ proc rawGet[A](t: CountTable[A], key: A): int =
     h = nextTry(h, high(t.data))
   result = -1 - h                   # < 0 => MISSING; insert idx = -1 - result
 
-proc `[]`*[A](t: CountTable[A], key: A): int =
-  ## retrieves the value at ``t[key]``. If `key` is not in `t`,
-  ## 0 is returned. One can check with ``hasKey`` whether the key
-  ## exists.
+template ctget(t, key: untyped): untyped {.immediate.} =
   var index = rawGet(t, key)
   if index >= 0: result = t.data[index].val
+  else:
+    when compiles($key):
+      raise newException(KeyError, "key not found: " & $key)
+    else:
+      raise newException(KeyError, "key not found")
 
-proc mget*[A](t: var CountTable[A], key: A): var int =
+proc `[]`*[A](t: CountTable[A], key: A): int {.deprecatedGet.} =
+  ## retrieves the value at ``t[key]``. If `key` is not in `t`,
+  ## the ``KeyError`` exception is raised. One can check with ``hasKey``
+  ## whether the key exists.
+  ctget(t, key)
+
+proc `[]`*[A](t: var CountTable[A], key: A): var int {.deprecatedGet.} =
   ## retrieves the value at ``t[key]``. The value can be modified.
-  ## If `key` is not in `t`, the ``EInvalidKey`` exception is raised.
+  ## If `key` is not in `t`, the ``KeyError`` exception is raised.
+  ctget(t, key)
+
+proc mget*[A](t: var CountTable[A], key: A): var int {.deprecated.} =
+  ## retrieves the value at ``t[key]``. The value can be modified.
+  ## If `key` is not in `t`, the ``KeyError`` exception is raised.
+  ## Use ```[]``` instead.
+  ctget(t, key)
+
+proc getOrDefault*[A](t: CountTable[A], key: A): int =
   var index = rawGet(t, key)
   if index >= 0: result = t.data[index].val
-  else: raise newException(KeyError, "key not found: " & $key)
 
 proc hasKey*[A](t: CountTable[A], key: A): bool =
   ## returns true iff `key` is in the table `t`.
@@ -950,16 +875,19 @@ iterator mvalues*[A](t: CountTableRef[A]): var int =
   for h in 0..high(t.data):
     if t.data[h].val != 0: yield t.data[h].val
 
-proc `[]`*[A](t: CountTableRef[A], key: A): int =
-  ## retrieves the value at ``t[key]``. If `key` is not in `t`,
-  ## 0 is returned. One can check with ``hasKey`` whether the key
-  ## exists.
+proc `[]`*[A](t: CountTableRef[A], key: A): var int {.deprecatedGet.} =
+  ## retrieves the value at ``t[key]``. The value can be modified.
+  ## If `key` is not in `t`, the ``KeyError`` exception is raised.
   result = t[][key]
 
-proc mget*[A](t: CountTableRef[A], key: A): var int =
+proc mget*[A](t: CountTableRef[A], key: A): var int {.deprecated.} =
   ## retrieves the value at ``t[key]``. The value can be modified.
-  ## If `key` is not in `t`, the ``EInvalidKey`` exception is raised.
-  result = t[].mget(key)
+  ## If `key` is not in `t`, the ``KeyError`` exception is raised.
+  ## Use ```[]``` instead.
+  result = t[][key]
+
+proc getOrDefault*[A](t: CountTableRef[A], key: A): int =
+  result = t[].getOrDefault(key)
 
 proc hasKey*[A](t: CountTableRef[A], key: A): bool =
   ## returns true iff `key` is in the table `t`.
@@ -1100,3 +1028,15 @@ when isMainModule:
   assert(merged["foo"] == 5)
   assert(merged["bar"] == 3)
   assert(merged["baz"] == 14)
+
+  block:
+    const testKey = "TESTKEY"
+    let t: CountTableRef[string] = newCountTable[string]()
+
+    # Before, does not compile with error message:
+    #test_counttable.nim(7, 43) template/generic instantiation from here
+    #lib/pure/collections/tables.nim(117, 21) template/generic instantiation from here
+    #lib/pure/collections/tableimpl.nim(32, 27) Error: undeclared field: 'hcode
+    doAssert 0 == t.getOrDefault(testKey)
+    t.inc(testKey,3)
+    doAssert 3 == t.getOrDefault(testKey)

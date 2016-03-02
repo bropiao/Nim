@@ -9,7 +9,7 @@
 
 ## Implementation of a `queue`:idx:. The underlying implementation uses a ``seq``.
 ## Note: For inter thread communication use
-## a `TChannel <channels.html>`_ instead.
+## a `Channel <channels.html>`_ instead.
 
 import math
 
@@ -77,7 +77,7 @@ proc dequeue*[T](q: var Queue[T]): T =
   result = q.data[q.rd]
   q.rd = (q.rd + 1) and q.mask
 
-proc `$`*[T](q: Queue[T]): string = 
+proc `$`*[T](q: Queue[T]): string =
   ## turns a queue into its string representation.
   result = "["
   for x in items(q):
@@ -95,7 +95,7 @@ when isMainModule:
   q.add(6)
   var second = q.dequeue
   q.add(789)
-  
+
   assert first == 123
   assert second == 9
   assert($q == "[4, 56, 6, 789]")

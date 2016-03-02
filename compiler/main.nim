@@ -15,7 +15,7 @@ import
   wordrecg, sem, semdata, idents, passes, docgen, extccomp,
   cgen, jsgen, json, nversion,
   platform, nimconf, importer, passaux, depends, vm, vmdef, types, idgen,
-  tables, docgen2, service, parser, modules, ccgutils, sigmatch, ropes, lists
+  docgen2, service, parser, modules, ccgutils, sigmatch, ropes, lists
 
 from magicsys import systemModule, resetSysTypes
 
@@ -70,7 +70,7 @@ proc commandCompileToC =
     lastCaasCmd = curCaasCmd
     resetCgenModules()
     for i in 0 .. <gMemCacheData.len:
-      gMemCacheData[i].crcStatus = crcCached
+      gMemCacheData[i].hashStatus = hashCached
       gMemCacheData[i].needsRecompile = Maybe
 
       # XXX: clean these global vars
@@ -108,6 +108,7 @@ proc commandCompileToJS =
   defineSymbol("nimrod") # 'nimrod' is always defined
   defineSymbol("ecmascript") # For backward compatibility
   defineSymbol("js")
+  if gCmd == cmdCompileToPHP: defineSymbol("nimphp")
   semanticPasses()
   registerPass(JSgenPass)
   compileProject()
@@ -116,7 +117,7 @@ proc interactivePasses =
   #incl(gGlobalOptions, optSafeCode)
   #setTarget(osNimrodVM, cpuNimrodVM)
   initDefines()
-  defineSymbol("nimrodvm")
+  defineSymbol("nimscript")
   when hasFFI: defineSymbol("nimffi")
   registerPass(verbosePass)
   registerPass(semPass)
@@ -190,7 +191,6 @@ proc resetMemory =
   resetRopeCache()
   resetSysTypes()
   gOwners = @[]
-  rangeDestructorProc = nil
   for i in low(buckets)..high(buckets):
     buckets[i] = nil
   idAnon = nil
@@ -237,7 +237,7 @@ proc mainCommand* =
   when SimulateCaasMemReset:
     gGlobalOptions.incl(optCaasEnabled)
 
-  # In "nimrod serve" scenario, each command must reset the registered passes
+  # In "nim serve" scenario, each command must reset the registered passes
   clearPasses()
   gLastCmdTime = epochTime()
   appendStr(searchPaths, options.libpath)
@@ -267,6 +267,9 @@ proc mainCommand* =
       rawMessage(errInvalidCommandX, command)
   of "js", "compiletojs":
     gCmd = cmdCompileToJS
+    commandCompileToJS()
+  of "php":
+    gCmd = cmdCompileToPHP
     commandCompileToJS()
   of "doc":
     wantMainModule()
@@ -318,11 +321,12 @@ proc mainCommand* =
         (key: "lib_paths", val: libpaths)
       ]
 
-      outWriteln($dumpdata)
+      msgWriteln($dumpdata, {msgStdout, msgSkipHook})
     else:
-      outWriteln("-- list of currently defined symbols --")
-      for s in definedSymbolNames(): outWriteln(s)
-      outWriteln("-- end of list --")
+      msgWriteln("-- list of currently defined symbols --",
+                 {msgStdout, msgSkipHook})
+      for s in definedSymbolNames(): msgWriteln(s, {msgStdout, msgSkipHook})
+      msgWriteln("-- end of list --", {msgStdout, msgSkipHook})
 
       for it in iterSearchPath(searchPaths): msgWriteln(it)
   of "check":
@@ -337,7 +341,7 @@ proc mainCommand* =
     wantMainModule()
     commandScan()
     msgWriteln("Beware: Indentation tokens depend on the parser\'s state!")
-  of "i":
+  of "secret":
     gCmd = cmdInteractive
     commandInteractive()
   of "e":
@@ -356,12 +360,14 @@ proc mainCommand* =
     gGlobalOptions.incl(optCaasEnabled)
     msgs.gErrorMax = high(int)  # do not stop after first error
     serve(mainCommand)
+  of "nop", "help":
+    # prevent the "success" message:
+    gCmd = cmdDump
   else:
     rawMessage(errInvalidCommandX, command)
 
-  if (msgs.gErrorCounter == 0 and
-      gCmd notin {cmdInterpret, cmdRun, cmdDump} and
-      gVerbosity > 0):
+  if msgs.gErrorCounter == 0 and
+     gCmd notin {cmdInterpret, cmdRun, cmdDump}:
     rawMessage(hintSuccessX, [$gLinesCompiled,
                formatFloat(epochTime() - gLastCmdTime, ffDecimal, 3),
                formatSize(getTotalMem()),
@@ -379,3 +385,4 @@ proc mainCommand* =
   when SimulateCaasMemReset:
     resetMemory()
 
+  resetAttributes()

@@ -1,7 +1,7 @@
 #
 #
 #            Nim's Runtime Library
-#        (c) Copyright 2012 Andreas Rumpf
+#        (c) Copyright 2015 Andreas Rumpf
 #
 #    See the file "copying.txt", included in this
 #    distribution, for details about the copyright.
@@ -12,7 +12,7 @@
 ## report at program exit.
 
 when not defined(profiler) and not defined(memProfiler):
-  {.warning: "Profiling support is turned off!".}
+  {.error: "Profiling support is turned off! Enable profiling by passing `--profiler:on --stackTrace:on` to the compiler (see the Nim Compiler User Guide for more options).".}
 
 # We don't want to profile the profiling code ...
 {.push profiler: off.}
@@ -117,24 +117,38 @@ when defined(memProfiler):
   var
     gTicker {.threadvar.}: int
 
-  proc hook(st: StackTrace, size: int) {.nimcall.} =
+  proc requestedHook(): bool {.nimcall.} =
     if gTicker == 0:
-      gTicker = -1
-      when defined(ignoreAllocationSize):
-        hookAux(st, 1)
-      else:
-        hookAux(st, size)
       gTicker = SamplingInterval
+      result = true
     dec gTicker
+
+  proc hook(st: StackTrace, size: int) {.nimcall.} =
+    when defined(ignoreAllocationSize):
+      hookAux(st, 1)
+    else:
+      hookAux(st, size)
 
 else:
   var
     t0 {.threadvar.}: Ticks
+    gTicker: int # we use an additional counter to
+                 # avoid calling 'getTicks' too frequently
+
+  proc requestedHook(): bool {.nimcall.} =
+    if interval == 0: result = true
+    elif gTicker == 0:
+      gTicker = 500
+      if getTicks() - t0 > interval:
+        result = true
+    else:
+      dec gTicker
 
   proc hook(st: StackTrace) {.nimcall.} =
+    #echo "profiling! ", interval
     if interval == 0:
       hookAux(st, 1)
-    elif int64(t0) == 0 or getTicks() - t0 > interval:
+    else:
       hookAux(st, 1)
       t0 = getTicks()
 
@@ -145,9 +159,10 @@ proc cmpEntries(a, b: ptr ProfileEntry): int =
   result = b.getTotal - a.getTotal
 
 proc `//`(a, b: int): string =
-  result = format("$1/$2 = $3%", a, b, formatFloat(a / b * 100.0, ffDefault, 2))
+  result = format("$1/$2 = $3%", a, b, formatFloat(a / b * 100.0, ffDecimal, 2))
 
 proc writeProfile() {.noconv.} =
+  system.profilingRequestedHook = nil
   when declared(system.StackTrace):
     system.profilerHook = nil
   const filename = "profile_results.txt"
@@ -155,7 +170,7 @@ proc writeProfile() {.noconv.} =
   var f: File
   if open(f, filename, fmWrite):
     sort(profileData, cmpEntries)
-    writeln(f, "total executions of each stack trace:")
+    writeLine(f, "total executions of each stack trace:")
     var entries = 0
     for i in 0..high(profileData):
       if profileData[i] != nil: inc entries
@@ -175,13 +190,13 @@ proc writeProfile() {.noconv.} =
     for i in 0..min(100, entries-1):
       if profileData[i].total > 1:
         inc sum, profileData[i].total
-        writeln(f, "Entry: ", i+1, "/", entries, " Calls: ",
+        writeLine(f, "Entry: ", i+1, "/", entries, " Calls: ",
           profileData[i].total // totalCalls, " [sum: ", sum, "; ",
           sum // totalCalls, "]")
         for ii in 0..high(StackTrace):
           let procname = profileData[i].st[ii]
           if isNil(procname): break
-          writeln(f, "  ", procname, " ", perProc[$procname] // totalCalls)
+          writeLine(f, "  ", procname, " ", perProc[$procname] // totalCalls)
     close(f)
     echo "... done"
   else:
@@ -193,14 +208,15 @@ var
 proc disableProfiling*() =
   when declared(system.StackTrace):
     atomicDec disabled
-    system.profilerHook = nil
+    system.profilingRequestedHook = nil
 
 proc enableProfiling*() =
   when declared(system.StackTrace):
     if atomicInc(disabled) >= 0:
-      system.profilerHook = hook
+      system.profilingRequestedHook = requestedHook
 
 when declared(system.StackTrace):
+  system.profilingRequestedHook = requestedHook
   system.profilerHook = hook
   addQuitProc(writeProfile)
 

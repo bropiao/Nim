@@ -16,13 +16,13 @@ const
     # above X strings a hash-switch for strings is generated
 
 proc registerGcRoot(p: BProc, v: PSym) =
-  if gSelectedGC in {gcMarkAndSweep, gcGenerational} and
+  if gSelectedGC in {gcMarkAndSweep, gcGenerational, gcV2} and
       containsGarbageCollectedRef(v.loc.t):
     # we register a specialized marked proc here; this has the advantage
     # that it works out of the box for thread local storage then :-)
     let prc = genTraverseProcForGlobal(p.module, v)
-    linefmt(p.module.initProc, cpsStmts,
-      "#nimRegisterGlobalMarker($1);$n", prc)
+    appcg(p.module, p.module.initProc.procSec(cpsStmts),
+      "#nimRegisterGlobalMarker($1);$n", [prc])
 
 proc isAssignedImmediately(n: PNode): bool {.inline.} =
   if n.kind == nkEmpty: return false
@@ -102,7 +102,7 @@ proc assignLabel(b: var TBlock): Rope {.inline.} =
 proc blockBody(b: var TBlock): Rope =
   result = b.sections[cpsLocals]
   if b.frameLen > 0:
-    result.addf("F.len+=$1;$n", [b.frameLen.rope])
+    result.addf("FR.len+=$1;$n", [b.frameLen.rope])
   result.add(b.sections[cpsInit])
   result.add(b.sections[cpsStmts])
 
@@ -123,7 +123,7 @@ proc endBlock(p: BProc) =
       ~"}$n"
   let frameLen = p.blocks[topBlock].frameLen
   if frameLen > 0:
-    blockEnd.addf("F.len-=$1;$n", [frameLen.rope])
+    blockEnd.addf("FR.len-=$1;$n", [frameLen.rope])
   endBlock(p, blockEnd)
 
 proc genSimpleBlock(p: BProc, stmts: PNode) {.inline.} =
@@ -928,8 +928,10 @@ proc genTry(p: BProc, t: PNode, d: var TLoc) =
       for j in countup(0, blen - 2):
         assert(t.sons[i].sons[j].kind == nkType)
         if orExpr != nil: add(orExpr, "||")
-        appcg(p.module, orExpr,
-              "#isObj(#getCurrentException()->Sup.m_type, $1)",
+        let isObjFormat = if not p.module.compileToCpp:
+          "#isObj(#getCurrentException()->Sup.m_type, $1)"
+          else: "#isObj(#getCurrentException()->m_type, $1)"
+        appcg(p.module, orExpr, isObjFormat,
               [genTypeInfo(p.module, t.sons[i].sons[j].typ)])
       if i > 1: line(p, cpsStmts, "else ")
       startBlock(p, "if ($1) {$n", [orExpr])
@@ -955,7 +957,7 @@ proc genAsmOrEmitStmt(p: BProc, t: PNode, isAsmStmt=false): Rope =
       res.add(t.sons[i].strVal)
     of nkSym:
       var sym = t.sons[i].sym
-      if sym.kind in {skProc, skIterator, skClosureIterator, skMethod}:
+      if sym.kind in {skProc, skIterator, skMethod}:
         var a: TLoc
         initLocExpr(p, t.sons[i], a)
         res.add($rdLoc(a))
@@ -1002,8 +1004,10 @@ proc genAsmStmt(p: BProc, t: PNode) =
 proc determineSection(n: PNode): TCFileSection =
   result = cfsProcHeaders
   if n.len >= 1 and n.sons[0].kind in {nkStrLit..nkTripleStrLit}:
-    if n.sons[0].strVal.startsWith("/*TYPESECTION*/"): result = cfsTypes
-    elif n.sons[0].strVal.startsWith("/*VARSECTION*/"): result = cfsVars
+    let sec = n.sons[0].strVal
+    if sec.startsWith("/*TYPESECTION*/"): result = cfsTypes
+    elif sec.startsWith("/*VARSECTION*/"): result = cfsVars
+    elif sec.startsWith("/*INCLUDESECTION*/"): result = cfsHeaders
 
 proc genEmit(p: BProc, t: PNode) =
   var s = genAsmOrEmitStmt(p, t.sons[1])
@@ -1099,7 +1103,10 @@ proc genAsgn(p: BProc, e: PNode, fastAsgn: bool) =
     genGotoVar(p, e.sons[1])
   elif not fieldDiscriminantCheckNeeded(p, e):
     var a: TLoc
-    initLocExpr(p, e.sons[0], a)
+    if e[0].kind in {nkDerefExpr, nkHiddenDeref}:
+      genDeref(p, e[0], a, enforceDeref=true)
+    else:
+      initLocExpr(p, e.sons[0], a)
     if fastAsgn: incl(a.flags, lfNoDeepCopy)
     assert(a.t != nil)
     loadInto(p, e.sons[0], e.sons[1], a)

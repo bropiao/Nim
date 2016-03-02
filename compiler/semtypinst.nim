@@ -14,22 +14,11 @@ import ast, astalgo, msgs, types, magicsys, semdata, renderer
 const
   tfInstClearedFlags = {tfHasMeta}
 
-proc sharedPtrCheck(info: TLineInfo, t: PType) =
-  if t.kind == tyPtr and t.len > 1:
-    if t.sons[0].sym.magic == mShared:
-      incl(t.flags, tfShared)
-      #if t.sons[0].sym.magic == mGuarded: incl(t.flags, tfGuarded)
-      if tfHasGCedMem in t.flags or t.isGCedMem:
-        localError(info, errGenerated,
-                   "shared memory may not refer to GC'ed thread local memory")
-
 proc checkPartialConstructedType(info: TLineInfo, t: PType) =
   if tfAcyclic in t.flags and skipTypes(t, abstractInst).kind != tyObject:
     localError(info, errInvalidPragmaX, "acyclic")
   elif t.kind == tyVar and t.sons[0].kind == tyVar:
     localError(info, errVarVarTypeNotAllowed)
-  else:
-    sharedPtrCheck(info, t)
 
 proc checkConstructedType*(info: TLineInfo, typ: PType) =
   var t = typ.skipTypes({tyDistinct})
@@ -40,8 +29,6 @@ proc checkConstructedType*(info: TLineInfo, typ: PType) =
     localError(info, errVarVarTypeNotAllowed)
   elif computeSize(t) == szIllegalRecursion:
     localError(info, errIllegalRecursionInTypeX, typeToString(t))
-  else:
-    sharedPtrCheck(info, t)
   when false:
     if t.kind == tyObject and t.sons[0] != nil:
       if t.sons[0].kind != tyObject or tfFinal in t.sons[0].flags:
@@ -60,7 +47,7 @@ proc searchInstTypes*(key: PType): PType =
     if inst.id == key.id: return inst
     if inst.sons.len < key.sons.len:
       # XXX: This happens for prematurely cached
-      # types such as TChannel[empty]. Why?
+      # types such as Channel[empty]. Why?
       # See the notes for PActor in handleGenericInvocation
       return
     block matchType:
@@ -75,8 +62,12 @@ proc searchInstTypes*(key: PType): PType =
 proc cacheTypeInst*(inst: PType) =
   # XXX: add to module's generics
   #      update the refcount
-  let genericTyp = inst.sons[0]
-  genericTyp.sym.typeInstCache.safeAdd(inst)
+  let gt = inst.sons[0]
+  let t = if gt.kind == tyGenericBody: gt.lastSon else: gt
+  if t.kind in {tyStatic, tyGenericParam} + tyTypeClasses:
+    return
+  gt.sym.typeInstCache.safeAdd(inst)
+
 
 type
   TReplTypeVars* {.final.} = object
@@ -90,6 +81,8 @@ type
     allowMetaTypes*: bool     # allow types such as seq[Number]
                               # i.e. the result contains unresolved generics
     skipTypedesc*: bool       # wether we should skip typeDescs
+    owner*: PSym              # where this instantiation comes from
+    recursionLimit: int
 
 proc replaceTypeVarsTAux(cl: var TReplTypeVars, t: PType): PType
 proc replaceTypeVarsS(cl: var TReplTypeVars, s: PSym): PSym
@@ -207,14 +200,17 @@ proc replaceTypeVarsN(cl: var TReplTypeVars, n: PNode): PNode =
 
 proc replaceTypeVarsS(cl: var TReplTypeVars, s: PSym): PSym =
   if s == nil: return nil
-  result = PSym(idTableGet(cl.symMap, s))
-  if result == nil:
-    result = copySym(s, false)
-    incl(result.flags, sfFromGeneric)
-    idTablePut(cl.symMap, s, result)
-    result.owner = s.owner
-    result.typ = replaceTypeVarsT(cl, s.typ)
-    result.ast = replaceTypeVarsN(cl, s.ast)
+  # symbol is not our business:
+  if cl.owner != nil and s.owner != cl.owner:
+    return s
+  #result = PSym(idTableGet(cl.symMap, s))
+  #if result == nil:
+  result = copySym(s, false)
+  incl(result.flags, sfFromGeneric)
+  #idTablePut(cl.symMap, s, result)
+  result.owner = s.owner
+  result.typ = replaceTypeVarsT(cl, s.typ)
+  result.ast = replaceTypeVarsN(cl, s.ast)
 
 proc lookupTypeVar(cl: var TReplTypeVars, t: PType): PType =
   result = PType(idTableGet(cl.typeMap, t))
@@ -365,10 +361,23 @@ proc propagateFieldFlags(t: PType, n: PNode) =
   else: discard
 
 proc replaceTypeVarsTAux(cl: var TReplTypeVars, t: PType): PType =
+  template bailout =
+    if cl.recursionLimit > 100:
+      # bail out, see bug #2509. But note this caching is in general wrong,
+      # look at this example where TwoVectors should not share the generic
+      # instantiations (bug #3112):
+
+      # type
+      #   Vector[N: static[int]] = array[N, float64]
+      #   TwoVectors[Na, Nb: static[int]] = (Vector[Na], Vector[Nb])
+      result = PType(idTableGet(cl.localCache, t))
+      if result != nil: return result
+    inc cl.recursionLimit
+
   result = t
   if t == nil: return
 
-  if t.kind in {tyStatic, tyGenericParam, tyIter} + tyTypeClasses:
+  if t.kind in {tyStatic, tyGenericParam} + tyTypeClasses:
     let lookup = PType(idTableGet(cl.typeMap, t))
     if lookup != nil: return lookup
 
@@ -420,8 +429,7 @@ proc replaceTypeVarsTAux(cl: var TReplTypeVars, t: PType): PType =
     result = t
 
   of tyGenericInst:
-    result = PType(idTableGet(cl.localCache, t))
-    if result != nil: return result
+    bailout()
     result = instCopyType(cl, t)
     idTablePut(cl.localCache, t, result)
     for i in 1 .. <result.sonsLen:
@@ -431,8 +439,7 @@ proc replaceTypeVarsTAux(cl: var TReplTypeVars, t: PType): PType =
   else:
     if containsGenericType(t):
       #if not cl.allowMetaTypes:
-      result = PType(idTableGet(cl.localCache, t))
-      if result != nil: return result
+      bailout()
       result = instCopyType(cl, t)
       result.size = -1 # needs to be recomputed
       #if not cl.allowMetaTypes:
@@ -440,8 +447,14 @@ proc replaceTypeVarsTAux(cl: var TReplTypeVars, t: PType): PType =
 
       for i in countup(0, sonsLen(result) - 1):
         if result.sons[i] != nil:
-          result.sons[i] = replaceTypeVarsT(cl, result.sons[i])
-          propagateToOwner(result, result.sons[i])
+          var r = replaceTypeVarsT(cl, result.sons[i])
+          if result.kind == tyObject:
+            # carefully coded to not skip the precious tyGenericInst:
+            let r2 = r.skipTypes({tyGenericInst})
+            if r2.kind in {tyPtr, tyRef}:
+              r = skipTypes(r2, {tyPtr, tyRef})
+          result.sons[i] = r
+          propagateToOwner(result, r)
 
       result.n = replaceTypeVarsN(cl, result.n)
 
@@ -459,22 +472,33 @@ proc replaceTypeVarsTAux(cl: var TReplTypeVars, t: PType): PType =
 
       else: discard
 
-proc initTypeVars*(p: PContext, pt: TIdTable, info: TLineInfo): TReplTypeVars =
+proc initTypeVars*(p: PContext, pt: TIdTable, info: TLineInfo;
+                   owner: PSym): TReplTypeVars =
   initIdTable(result.symMap)
   copyIdTable(result.typeMap, pt)
   initIdTable(result.localCache)
   result.info = info
   result.c = p
+  result.owner = owner
 
-proc replaceTypesInBody*(p: PContext, pt: TIdTable, n: PNode): PNode =
-  var cl = initTypeVars(p, pt, n.info)
+proc replaceTypesInBody*(p: PContext, pt: TIdTable, n: PNode;
+                         owner: PSym): PNode =
+  var cl = initTypeVars(p, pt, n.info, owner)
+  pushInfoContext(n.info)
+  result = replaceTypeVarsN(cl, n)
+  popInfoContext()
+
+proc replaceTypesForLambda*(p: PContext, pt: TIdTable, n: PNode;
+                            original, new: PSym): PNode =
+  var cl = initTypeVars(p, pt, n.info, original)
+  idTablePut(cl.symMap, original, new)
   pushInfoContext(n.info)
   result = replaceTypeVarsN(cl, n)
   popInfoContext()
 
 proc generateTypeInstance*(p: PContext, pt: TIdTable, info: TLineInfo,
                            t: PType): PType =
-  var cl = initTypeVars(p, pt, info)
+  var cl = initTypeVars(p, pt, info, nil)
   pushInfoContext(info)
   result = replaceTypeVarsT(cl, t)
   popInfoContext()

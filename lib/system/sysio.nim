@@ -31,37 +31,50 @@ proc fprintf(f: File, frmt: cstring) {.importc: "fprintf",
 proc strlen(c: cstring): int {.
   importc: "strlen", header: "<string.h>", tags: [].}
 
-when defined(posix):
-  proc getc_unlocked(stream: File): cint {.importc: "getc_unlocked",
-    header: "<stdio.h>", tags: [ReadIOEffect].}
-
-  proc flockfile(stream: File) {.importc: "flockfile", header: "<stdio.h>",
-    tags: [ReadIOEffect].}
-
-  proc funlockfile(stream: File) {.importc: "funlockfile", header: "<stdio.h>",
-    tags: [ReadIOEffect].}
-elif false:
-  # doesn't work on Windows yet:
-  proc getc_unlocked(stream: File): cint {.importc: "_fgetc_nolock",
-    header: "<stdio.h>", tags: [ReadIOEffect].}
-
-  proc flockfile(stream: File) {.importc: "_lock_file", header: "<stdio.h>",
-    tags: [ReadIOEffect].}
-
-  proc funlockfile(stream: File) {.importc: "_unlock_file", header: "<stdio.h>",
-    tags: [ReadIOEffect].}
-
 # C routine that is used here:
 proc fread(buf: pointer, size, n: int, f: File): int {.
   importc: "fread", header: "<stdio.h>", tags: [ReadIOEffect].}
 proc fseek(f: File, offset: clong, whence: int): int {.
   importc: "fseek", header: "<stdio.h>", tags: [].}
 proc ftell(f: File): int {.importc: "ftell", header: "<stdio.h>", tags: [].}
+proc ferror(f: File): int {.importc: "ferror", header: "<stdio.h>", tags: [].}
 proc setvbuf(stream: File, buf: pointer, typ, size: cint): cint {.
   importc, header: "<stdio.h>", tags: [].}
+proc memchr(s: pointer, c: cint, n: csize): pointer {.
+  importc: "memchr", header: "<string.h>", tags: [].}
+proc memset(s: pointer, c: cint, n: csize) {.
+  header: "<string.h>", importc: "memset", tags: [].}
+proc fwrite(buf: pointer, size, n: int, f: File): int {.
+  importc: "fwrite", noDecl.}
+
+proc raiseEIO(msg: string) {.noinline, noreturn.} =
+  sysFatal(IOError, msg)
 
 {.push stackTrace:off, profiler:off.}
+proc readBuffer(f: File, buffer: pointer, len: Natural): int =
+  result = fread(buffer, 1, len, f)
+
+proc readBytes(f: File, a: var openArray[int8|uint8], start, len: Natural): int =
+  result = readBuffer(f, addr(a[start]), len)
+
+proc readChars(f: File, a: var openArray[char], start, len: Natural): int =
+  result = readBuffer(f, addr(a[start]), len)
+
 proc write(f: File, c: cstring) = fputs(c, f)
+
+proc writeBuffer(f: File, buffer: pointer, len: Natural): int =
+  result = fwrite(buffer, 1, len, f)
+
+proc writeBytes(f: File, a: openArray[int8|uint8], start, len: Natural): int =
+  var x = cast[ptr array[0..1000_000_000, int8]](a)
+  result = writeBuffer(f, addr(x[start]), len)
+proc writeChars(f: File, a: openArray[char], start, len: Natural): int =
+  var x = cast[ptr array[0..1000_000_000, int8]](a)
+  result = writeBuffer(f, addr(x[start]), len)
+
+proc write(f: File, s: string) =
+  if writeBuffer(f, cstring(s), s.len) != s.len:
+    raiseEIO("cannot write string to file")
 {.pop.}
 
 when NoFakeVars:
@@ -83,43 +96,44 @@ else:
 const
   BufSize = 4000
 
-proc raiseEIO(msg: string) {.noinline, noreturn.} =
-  sysFatal(IOError, msg)
+proc readLine(f: File, line: var TaintedString): bool =
+  var pos = 0
+  # Use the currently reserved space for a first try
+  when defined(nimscript):
+    var space = 80
+  else:
+    var space = cast[PGenericSeq](line.string).space
+  line.string.setLen(space)
 
-when declared(getc_unlocked):
-  proc readLine(f: File, line: var TaintedString): bool =
-    setLen(line.string, 0) # reuse the buffer!
-    flockfile(f)
-    while true:
-      var c = getc_unlocked(f)
-      if c < 0'i32:
-        if line.len > 0: break
-        else: return false
-      if c == 10'i32: break # LF
-      if c == 13'i32:  # CR
-        c = getc_unlocked(f) # is the next char LF?
-        if c != 10'i32: ungetc(c, f) # no, put the character back
-        break
-      add line.string, chr(int(c))
-    result = true
-    funlockfile(f)
-else:
-  proc readLine(f: File, line: var TaintedString): bool =
-    # of course this could be optimized a bit; but IO is slow anyway...
-    # and it was difficult to get this CORRECT with Ansi C's methods
-    setLen(line.string, 0) # reuse the buffer!
-    while true:
-      var c = fgetc(f)
-      if c < 0'i32:
-        if line.len > 0: break
-        else: return false
-      if c == 10'i32: break # LF
-      if c == 13'i32:  # CR
-        c = fgetc(f) # is the next char LF?
-        if c != 10'i32: ungetc(c, f) # no, put the character back
-        break
-      add line.string, chr(int(c))
-    result = true
+  while true:
+    # memset to \l so that we can tell how far fgets wrote, even on EOF, where
+    # fgets doesn't append an \l
+    memset(addr line.string[pos], '\l'.ord, space)
+    if fgets(addr line.string[pos], space, f) == nil:
+      line.string.setLen(0)
+      return false
+    let m = memchr(addr line.string[pos], '\l'.ord, space)
+    if m != nil:
+      # \l found: Could be our own or the one by fgets, in any case, we're done
+      var last = cast[ByteAddress](m) - cast[ByteAddress](addr line.string[0])
+      if last > 0 and line.string[last-1] == '\c':
+        line.string.setLen(last-1)
+        return true
+        # We have to distinguish between two possible cases:
+        # \0\l\0 => line ending in a null character.
+        # \0\l\l => last line without newline, null was put there by fgets.
+      elif last > 0 and line.string[last-1] == '\0':
+        if last < pos + space - 1 and line.string[last+1] != '\0':
+          dec last
+      line.string.setLen(last)
+      return true
+    else:
+      # fgets will have inserted a null byte at the end of the string.
+      dec space
+    # No \l found: Increase buffer and read more
+    inc pos, space
+    space = 128 # read in 128 bytes at a time
+    line.string.setLen(pos+space)
 
 proc readLine(f: File): TaintedString =
   result = TaintedString(newStringOfCap(80))
@@ -168,12 +182,26 @@ proc rawFileSize(file: File): int =
   result = ftell(file)
   discard fseek(file, clong(oldPos), 0)
 
+proc endOfFile(f: File): bool =
+  # do not blame me; blame the ANSI C standard this is so brain-damaged
+  var c = fgetc(f)
+  ungetc(c, f)
+  return c < 0'i32
+
 proc readAllFile(file: File, len: int): string =
   # We acquire the filesize beforehand and hope it doesn't change.
   # Speeds things up.
-  result = newString(int(len))
-  if readBuffer(file, addr(result[0]), int(len)) != len:
+  result = newString(len)
+  let bytes = readBuffer(file, addr(result[0]), len)
+  if endOfFile(file):
+    if bytes < len:
+      result.setLen(bytes)
+  elif ferror(file) != 0:
     raiseEIO("error while reading from file")
+  else:
+    # We read all the bytes but did not reach the EOF
+    # Try to read it as a buffer
+    result.add(readAllBuffer(file))
 
 proc readAllFile(file: File): string =
   var len = rawFileSize(file)
@@ -182,38 +210,28 @@ proc readAllFile(file: File): string =
 proc readAll(file: File): TaintedString =
   # Separate handling needed because we need to buffer when we
   # don't know the overall length of the File.
-  let len = if file != stdin: rawFileSize(file) else: -1
+  when declared(stdin):
+    let len = if file != stdin: rawFileSize(file) else: -1
+  else:
+    let len = rawFileSize(file)
   if len > 0:
     result = readAllFile(file, len).TaintedString
   else:
     result = readAllBuffer(file).TaintedString
 
-proc readFile(filename: string): TaintedString =
-  var f = open(filename)
-  try:
-    result = readAll(f).TaintedString
-  finally:
-    close(f)
-
-proc writeFile(filename, content: string) =
-  var f = open(filename, fmWrite)
-  try:
-    f.write(content)
-  finally:
-    close(f)
-
-proc endOfFile(f: File): bool =
-  # do not blame me; blame the ANSI C standard this is so brain-damaged
-  var c = fgetc(f)
-  ungetc(c, f)
-  return c < 0'i32
-
-proc writeln[Ty](f: File, x: varargs[Ty, `$`]) =
-  for i in items(x): write(f, i)
+proc writeLn[Ty](f: File, x: varargs[Ty, `$`]) =
+  for i in items(x):
+    write(f, i)
   write(f, "\n")
 
-proc rawEcho(x: string) {.inline, compilerproc.} = write(stdout, x)
-proc rawEchoNL() {.inline, compilerproc.} = write(stdout, "\n")
+proc writeLine[Ty](f: File, x: varargs[Ty, `$`]) =
+  for i in items(x):
+    write(f, i)
+  write(f, "\n")
+
+when declared(stdout):
+  proc rawEcho(x: string) {.inline, compilerproc.} = write(stdout, x)
+  proc rawEchoNL() {.inline, compilerproc.} = write(stdout, "\n")
 
 # interface to the C procs:
 
@@ -271,38 +289,11 @@ proc reopen(f: File, filename: string, mode: FileMode = fmRead): bool =
   result = p != nil
 
 proc fdopen(filehandle: FileHandle, mode: cstring): File {.
-  importc: pccHack & "fdopen", header: "<stdio.h>".}
+  importc: "fdopen", header: "<stdio.h>".}
 
 proc open(f: var File, filehandle: FileHandle, mode: FileMode): bool =
   f = fdopen(filehandle, FormatOpen[mode])
   result = f != nil
-
-proc fwrite(buf: pointer, size, n: int, f: File): int {.
-  importc: "fwrite", noDecl.}
-
-proc readBuffer(f: File, buffer: pointer, len: Natural): int =
-  result = fread(buffer, 1, len, f)
-
-proc readBytes(f: File, a: var openArray[int8|uint8], start, len: Natural): int =
-  result = readBuffer(f, addr(a[start]), len)
-
-proc readChars(f: File, a: var openArray[char], start, len: Natural): int =
-  result = readBuffer(f, addr(a[start]), len)
-
-{.push stackTrace:off, profiler:off.}
-proc writeBytes(f: File, a: openArray[int8|uint8], start, len: Natural): int =
-  var x = cast[ptr array[0..1000_000_000, int8]](a)
-  result = writeBuffer(f, addr(x[start]), len)
-proc writeChars(f: File, a: openArray[char], start, len: Natural): int =
-  var x = cast[ptr array[0..1000_000_000, int8]](a)
-  result = writeBuffer(f, addr(x[start]), len)
-proc writeBuffer(f: File, buffer: pointer, len: Natural): int =
-  result = fwrite(buffer, 1, len, f)
-
-proc write(f: File, s: string) =
-  if writeBuffer(f, cstring(s), s.len) != s.len:
-    raiseEIO("cannot write string to file")
-{.pop.}
 
 proc setFilePos(f: File, pos: int64) =
   if fseek(f, clong(pos), 0) != 0:
@@ -317,5 +308,29 @@ proc getFileSize(f: File): int64 =
   discard fseek(f, 0, 2) # seek the end of the file
   result = getFilePos(f)
   setFilePos(f, oldPos)
+
+when not declared(close):
+  proc close(f: File) {.
+    importc: "fclose", header: "<stdio.h>", tags: [].}
+
+proc readFile(filename: string): TaintedString =
+  var f: File
+  if open(f, filename):
+    try:
+      result = readAll(f).TaintedString
+    finally:
+      close(f)
+  else:
+    sysFatal(IOError, "cannot open: ", filename)
+
+proc writeFile(filename, content: string) =
+  var f: File
+  if open(f, filename, fmWrite):
+    try:
+      f.write(content)
+    finally:
+      close(f)
+  else:
+    sysFatal(IOError, "cannot open: ", filename)
 
 {.pop.}

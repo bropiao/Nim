@@ -375,7 +375,7 @@ proc localDebugInfo(p: BProc, s: PSym) =
   var a = "&" & s.loc.r
   if s.kind == skParam and ccgIntroducedPtr(s): a = s.loc.r
   lineF(p, cpsInit,
-       "F.s[$1].address = (void*)$3; F.s[$1].typ = $4; F.s[$1].name = $2;$n",
+       "FR.s[$1].address = (void*)$3; FR.s[$1].typ = $4; FR.s[$1].name = $2;$n",
        [p.maxFrameLen.rope, makeCString(normalize(s.name.s)), a,
         genTypeInfo(p.module, s.loc.t)])
   inc(p.maxFrameLen)
@@ -505,8 +505,7 @@ proc loadDynamicLib(m: BModule, lib: PLib) =
     if lib.path.kind in {nkStrLit..nkTripleStrLit}:
       var s: TStringSeq = @[]
       libCandidates(lib.path.strVal, s)
-      if gVerbosity >= 2:
-        msgWriteln("Dependency: " & lib.path.strVal)
+      rawMessage(hintDependency, lib.path.strVal)
       var loadlib: Rope = nil
       for i in countup(0, high(s)):
         inc(m.labels)
@@ -595,10 +594,10 @@ proc cgsym(m: BModule, name: string): Rope =
   var sym = magicsys.getCompilerProc(name)
   if sym != nil:
     case sym.kind
-    of skProc, skMethod, skConverter, skIterators: genProc(m, sym)
+    of skProc, skMethod, skConverter, skIterator: genProc(m, sym)
     of skVar, skResult, skLet: genVarPrototype(m, sym)
     of skType: discard getTypeDesc(m, sym.typ)
-    else: internalError("cgsym: " & name)
+    else: internalError("cgsym: " & name & ": " & $sym.kind)
   else:
     # we used to exclude the system module from this check, but for DLL
     # generation support this sloppyness leads to hard to detect bugs, so
@@ -610,10 +609,12 @@ proc generateHeaders(m: BModule) =
   add(m.s[cfsHeaders], tnl & "#include \"nimbase.h\"" & tnl)
   var it = PStrEntry(m.headerFiles.head)
   while it != nil:
-    if it.data[0] notin {'\"', '<'}:
-      addf(m.s[cfsHeaders], "$N#include \"$1\"$N", [rope(it.data)])
+    if it.data[0] == '#':
+      add(m.s[cfsHeaders], rope(it.data.replace('`', '"') & tnl))
+    elif it.data[0] notin {'\"', '<'}:
+      addf(m.s[cfsHeaders], "#include \"$1\"$N", [rope(it.data)])
     else:
-      addf(m.s[cfsHeaders], "$N#include $1$N", [rope(it.data)])
+      addf(m.s[cfsHeaders], "#include $1$N", [rope(it.data)])
     it = PStrEntry(it.next)
 
 proc retIsNotVoid(s: PSym): bool =
@@ -622,7 +623,7 @@ proc retIsNotVoid(s: PSym): bool =
 proc initFrame(p: BProc, procname, filename: Rope): Rope =
   discard cgsym(p.module, "nimFrame")
   if p.maxFrameLen > 0:
-    discard cgsym(p.module, "TVarSlot")
+    discard cgsym(p.module, "VarSlot")
     result = rfmt(nil, "\tnimfrs($1, $2, $3, $4)$N",
                   procname, filename, p.maxFrameLen.rope,
                   p.blocks[0].frameLen.rope)
@@ -759,7 +760,7 @@ proc requestConstImpl(p: BProc, sym: PSym) =
   var m = p.module
   useHeader(m, sym)
   if sym.loc.k == locNone:
-    fillLoc(sym.loc, locData, sym.typ, mangleName(sym), OnUnknown)
+    fillLoc(sym.loc, locData, sym.typ, mangleName(sym), OnStatic)
   if lfNoDecl in sym.loc.flags: return
   # declare implementation:
   var q = findPendingModule(m, sym)
@@ -814,7 +815,7 @@ proc genVarPrototype(m: BModule, sym: PSym) =
   genVarPrototypeAux(m, sym)
 
 proc addIntTypes(result: var Rope) {.inline.} =
-  addf(result, "#define NIM_INTBITS $1", [
+  addf(result, "#define NIM_INTBITS $1" & tnl, [
     platform.CPU[targetCPU].intSize.rope])
 
 proc getCopyright(cfile: string): Rope =
@@ -852,14 +853,14 @@ proc genMainProc(m: BModule) =
     # functions, which might otherwise merge their stack frames.
     PreMainBody =
       "void PreMainInner() {$N" &
-      "\tsystemInit();$N" &
+      "\tsystemInit000();$N" &
       "$1" &
       "$2" &
       "$3" &
       "}$N$N" &
       "void PreMain() {$N" &
       "\tvoid (*volatile inner)();$N" &
-      "\tsystemDatInit();$N" &
+      "\tsystemDatInit000();$N" &
       "\tinner = PreMainInner;$N" &
       "$4$5" &
       "\t(*inner)();$N" &
@@ -949,7 +950,7 @@ proc genMainProc(m: BModule) =
     gBreakpoints.add(m.genFilenames)
 
   let initStackBottomCall =
-    if platform.targetOS == osStandalone: "".rope
+    if platform.targetOS == osStandalone or gSelectedGC == gcNone: "".rope
     else: ropecg(m, "\t#initStackBottomWith((void *)&inner);$N")
   inc(m.labels)
   appcg(m, m.s[cfsProcs], PreMainBody, [
@@ -973,8 +974,8 @@ proc getSomeInitName(m: PSym, suffix: string): Rope =
   result.add m.name.s
   result.add suffix
 
-proc getInitName(m: PSym): Rope = getSomeInitName(m, "Init")
-proc getDatInitName(m: PSym): Rope = getSomeInitName(m, "DatInit")
+proc getInitName(m: PSym): Rope = getSomeInitName(m, "Init000")
+proc getDatInitName(m: PSym): Rope = getSomeInitName(m, "DatInit000")
 
 proc registerModuleToMain(m: PSym) =
   var
@@ -1016,7 +1017,7 @@ proc genInitCode(m: BModule) =
       var procname = makeCString(m.module.name.s)
       add(prc, initFrame(m.initProc, procname, m.module.info.quotedFilename))
     else:
-      add(prc, ~"\tTFrame F; F.len = 0;$N")
+      add(prc, ~"\tTFrame F; FR.len = 0;$N")
 
   add(prc, genSectionStart(cpsInit))
   add(prc, m.preInitProc.s(cpsInit))
@@ -1109,7 +1110,7 @@ proc rawNewModule(module: PSym, filename: string): BModule =
 
 proc nullify[T](arr: var T) =
   for i in low(arr)..high(arr):
-    arr[i] = nil
+    arr[i] = Rope(nil)
 
 proc resetModule*(m: BModule) =
   # between two compilations in CAAS mode, we can throw
@@ -1328,4 +1329,3 @@ proc cgenWriteModules* =
   if generatedHeader != nil: writeHeader(generatedHeader)
 
 const cgenPass* = makePass(myOpen, myOpenCached, myProcess, myClose)
-

@@ -1,7 +1,7 @@
 #
 #
 #            Nim's Runtime Library
-#        (c) Copyright 2012 Andreas Rumpf
+#        (c) Copyright 2015 Andreas Rumpf
 #
 #    See the file "copying.txt", included in this
 #    distribution, for details about the copyright.
@@ -48,14 +48,15 @@ proc reverse*[T](a: var openArray[T]) =
   ## reverses the array `a`.
   reverse(a, 0, a.high)
 
-proc reversed*[T](a: openArray[T], first, last: Natural): seq[T] =
+proc reversed*[T](a: openArray[T], first: Natural, last: int): seq[T] =
   ## returns the reverse of the array `a[first..last]`.
-  result = newSeq[T](last - first + 1)
+  assert last >= first-1
+  var i = last - first
   var x = first.int
-  var y = last.int
-  while x <= last:
-    result[x] = a[y]
-    dec(y)
+  result = newSeq[T](i + 1)
+  while i >= 0:
+    result[i] = a[x]
+    dec(i)
     inc(x)
 
 proc reversed*[T](a: openArray[T]): seq[T] =
@@ -97,7 +98,7 @@ proc lowerBound*[T](a: openArray[T], key: T, cmp: proc(x,y: T): int {.closure.})
   ##
   ##   var arr = @[1,2,3,5,6,7,8,9]
   ##   arr.insert(4, arr.lowerBound(4))
-  ## `after running the above arr is `[1,2,3,4,5,6,7,8,9]`
+  ##   # after running the above arr is `[1,2,3,4,5,6,7,8,9]`
   result = a.low
   var count = a.high - a.low + 1
   var step, pos: int
@@ -160,8 +161,9 @@ proc merge[T](a, b: var openArray[T], lo, m, hi: int,
 proc sort*[T](a: var openArray[T],
               cmp: proc (x, y: T): int {.closure.},
               order = SortOrder.Ascending) =
-  ## Default Nim sort. The sorting is guaranteed to be stable and
-  ## the worst case is guaranteed to be O(n log n).
+  ## Default Nim sort (an implementation of merge sort). The sorting
+  ## is guaranteed to be stable and the worst case is guaranteed to
+  ## be O(n log n).
   ## The current implementation uses an iterative
   ## mergesort to achieve this. It uses a temporary sequence of
   ## length ``a.len div 2``. Currently Nim does not support a
@@ -237,6 +239,17 @@ template sortedByIt*(seq1, op: expr): expr =
     result = cmp(a, b))
   result
 
+proc isSorted*[T](a: openarray[T],
+                 cmp: proc(x, y: T): int {.closure.},
+                 order = SortOrder.Ascending): bool =
+  ## Checks to see whether `a` is already sorted in `order`
+  ## using `cmp` for the comparison. Parameters identical
+  ## to `sort`
+  result = true
+  for i in 0..<len(a)-1:
+    if cmp(a[i],a[i+1]) * order > 0:
+      return false
+
 proc product*[T](x: openArray[seq[T]]): seq[seq[T]] =
   ## produces the Cartesian product of the array. Warning: complexity
   ## may explode.
@@ -279,7 +292,7 @@ proc nextPermutation*[T](x: var openarray[T]): bool {.discardable.} =
   ##
   ##     var v = @[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
   ##     v.nextPermutation()
-  ##     echo v
+  ##     echo v # @[0, 1, 2, 3, 4, 5, 6, 7, 9, 8]
   if x.len < 2:
     return false
 
@@ -308,7 +321,7 @@ proc prevPermutation*[T](x: var openarray[T]): bool {.discardable.} =
   ##
   ##     var v = @[0, 1, 2, 3, 4, 5, 6, 7, 9, 8]
   ##     v.prevPermutation()
-  ##     echo v
+  ##     echo v # @[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
   if x.len < 2:
     return false
 
@@ -340,4 +353,19 @@ when isMainModule:
   assert arr.lowerBound(4) == 1
   assert arr.lowerBound(5) == 1
   assert arr.lowerBound(6) == 2
-
+  # Tests for isSorted
+  var srt1 = [1,2,3,4,4,4,4,5]
+  var srt2 = ["iello","hello"]
+  var srt3 = [1.0,1.0,1.0]
+  var srt4: seq[int] = @[]
+  assert srt1.isSorted(cmp) == true
+  assert srt2.isSorted(cmp) == false
+  assert srt3.isSorted(cmp) == true
+  var srtseq = newSeq[int]()
+  assert srtseq.isSorted(cmp) == true
+  # Tests for reversed
+  var arr1 = @[0,1,2,3,4]
+  assert arr1.reversed() == @[4,3,2,1,0]
+  for i in 0 .. high(arr1):
+    assert arr1.reversed(0, i) == arr1.reversed()[high(arr1) - i .. high(arr1)]
+    assert arr1.reversed(i, high(arr1)) == arr1.reversed()[0 .. high(arr1) - i]

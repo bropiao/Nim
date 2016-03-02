@@ -12,13 +12,25 @@
 
 {.deadCodeElim:on.}
 
+import dynlib
+
+when defined(vcc):
+  {.passC: "-DWIN32_LEAN_AND_MEAN".}
+
 const
   useWinUnicode* = not defined(useWinAnsi)
+
+when useWinUnicode:
+  type WinChar* = Utf16Char
+  {.deprecated: [TWinChar: WinChar].}
+else:
+  type WinChar* = char
+  {.deprecated: [TWinChar: WinChar].}
 
 type
   Handle* = int
   LONG* = int32
-  ULONG* = int
+  ULONG* = int32
   PULONG* = ptr int
   WINBOOL* = int32
   DWORD* = int32
@@ -74,16 +86,17 @@ type
     nFileIndexHigh*: DWORD
     nFileIndexLow*: DWORD
 
+  OSVERSIONINFO* {.final, pure.} = object
+    dwOSVersionInfoSize*: DWORD
+    dwMajorVersion*: DWORD
+    dwMinorVersion*: DWORD
+    dwBuildNumber*: DWORD
+    dwPlatformId*: DWORD
+    szCSDVersion*: array[0..127, WinChar];
+
 {.deprecated: [THandle: Handle, TSECURITY_ATTRIBUTES: SECURITY_ATTRIBUTES,
     TSTARTUPINFO: STARTUPINFO, TPROCESS_INFORMATION: PROCESS_INFORMATION,
     TFILETIME: FILETIME, TBY_HANDLE_FILE_INFORMATION: BY_HANDLE_FILE_INFORMATION].}
-
-when useWinUnicode:
-  type WinChar* = Utf16Char
-  {.deprecated: [TWinChar: WinChar].}
-else:
-  type WinChar* = char
-  {.deprecated: [TWinChar: WinChar].}
 
 const
   STARTF_USESHOWWINDOW* = 1'i32
@@ -108,6 +121,22 @@ const
 
   CREATE_UNICODE_ENVIRONMENT* = 1024'i32
 
+  PIPE_ACCESS_DUPLEX* = 0x00000003'i32
+  PIPE_ACCESS_INBOUND* = 1'i32
+  PIPE_ACCESS_OUTBOUND* = 2'i32
+  PIPE_NOWAIT* = 0x00000001'i32
+  SYNCHRONIZE* = 0x00100000'i32
+  FILE_FLAG_WRITE_THROUGH* = 0x80000000'i32
+
+  CREATE_NO_WINDOW* = 0x08000000'i32
+
+when useWinUnicode:
+  proc getVersionExW*(lpVersionInfo: ptr OSVERSIONINFO): WINBOOL {.stdcall, dynlib: "kernel32", importc: "GetVersionExW".}
+else:
+  proc getVersionExA*(lpVersionInfo: ptr OSVERSIONINFO): WINBOOL {.stdcall, dynlib: "kernel32", importc: "GetVersionExA".}
+
+proc getVersion*(): DWORD {.stdcall, dynlib: "kernel32", importc: "GetVersion".}
+
 proc closeHandle*(hObject: Handle): WINBOOL {.stdcall, dynlib: "kernel32",
     importc: "CloseHandle".}
 
@@ -124,6 +153,19 @@ proc createPipe*(hReadPipe, hWritePipe: var Handle,
                  lpPipeAttributes: var SECURITY_ATTRIBUTES,
                  nSize: int32): WINBOOL{.
     stdcall, dynlib: "kernel32", importc: "CreatePipe".}
+
+proc createNamedPipe*(lpName: WideCString,
+                     dwOpenMode, dwPipeMode, nMaxInstances, nOutBufferSize,
+                     nInBufferSize, nDefaultTimeOut: int32,
+                     lpSecurityAttributes: ptr SECURITY_ATTRIBUTES): Handle {.
+    stdcall, dynlib: "kernel32", importc: "CreateNamedPipeW".}
+
+proc peekNamedPipe*(hNamedPipe: Handle, lpBuffer: pointer=nil,
+                    nBufferSize: int32 = 0,
+                    lpBytesRead: ptr int32 = nil,
+                    lpTotalBytesAvail: ptr int32 = nil,
+                    lpBytesLeftThisMessage: ptr int32 = nil): bool {.
+    stdcall, dynlib: "kernel32", importc: "PeekNamedPipe".}
 
 when useWinUnicode:
   proc createProcessW*(lpApplicationName, lpCommandLine: WideCString,
@@ -168,6 +210,9 @@ proc flushFileBuffers*(hFile: Handle): WINBOOL {.stdcall, dynlib: "kernel32",
     importc: "FlushFileBuffers".}
 
 proc getLastError*(): int32 {.importc: "GetLastError",
+    stdcall, dynlib: "kernel32".}
+
+proc setLastError*(error: int32) {.importc: "SetLastError",
     stdcall, dynlib: "kernel32".}
 
 when useWinUnicode:
@@ -267,9 +312,9 @@ when useWinUnicode:
       stdcall, dynlib: "kernel32", importc: "FindNextFileW".}
 else:
   proc findFirstFileA*(lpFileName: cstring,
-                      lpFindFileData: var WIN32_FIND_DATA): THANDLE {.
+                      lpFindFileData: var WIN32_FIND_DATA): Handle {.
       stdcall, dynlib: "kernel32", importc: "FindFirstFileA".}
-  proc findNextFileA*(hFindFile: THANDLE,
+  proc findNextFileA*(hFindFile: Handle,
                      lpFindFileData: var WIN32_FIND_DATA): int32 {.
       stdcall, dynlib: "kernel32", importc: "FindNextFileA".}
 
@@ -409,7 +454,7 @@ type
     bytes*: array[0..15, char]
 
   Sockaddr_in6* {.importc: "SOCKADDR_IN6",
-                   header: "winsock2.h".} = object
+                   header: "ws2tcpip.h".} = object
     sin6_family*: int16
     sin6_port*: int16 # unsigned
     sin6_flowinfo*: int32 # unsigned
@@ -511,6 +556,9 @@ proc connect*(s: SocketHandle, name: ptr SockAddr, namelen: SockLen): cint {.
 proc getsockname*(s: SocketHandle, name: ptr SockAddr,
                   namelen: ptr SockLen): cint {.
   stdcall, importc: "getsockname", dynlib: ws2dll.}
+proc getpeername*(s: SocketHandle, name: ptr SockAddr,
+                  namelen: ptr SockLen): cint {.
+  stdcall, importc, dynlib: ws2dll.}
 proc getsockopt*(s: SocketHandle, level, optname: cint, optval: pointer,
                  optlen: ptr SockLen): cint {.
   stdcall, importc: "getsockopt", dynlib: ws2dll.}
@@ -609,11 +657,24 @@ const
 
   FILE_FLAG_BACKUP_SEMANTICS* = 33554432'i32
   FILE_FLAG_OPEN_REPARSE_POINT* = 0x00200000'i32
+  DUPLICATE_SAME_ACCESS* = 2
+  FILE_READ_DATA* = 0x00000001 # file & pipe
+  FILE_WRITE_DATA* = 0x00000002 # file & pipe
 
 # Error Constants
 const
   ERROR_ACCESS_DENIED* = 5
   ERROR_HANDLE_EOF* = 38
+  ERROR_BAD_ARGUMENTS* = 165
+
+proc duplicateHandle*(hSourceProcessHandle: HANDLE, hSourceHandle: HANDLE,
+                      hTargetProcessHandle: HANDLE,
+                      lpTargetHandle: ptr HANDLE,
+                      dwDesiredAccess: DWORD, bInheritHandle: WINBOOL,
+                      dwOptions: DWORD): WINBOOL{.stdcall, dynlib: "kernel32",
+    importc: "DuplicateHandle".}
+proc getCurrentProcess*(): HANDLE{.stdcall, dynlib: "kernel32",
+                                   importc: "GetCurrentProcess".}
 
 when useWinUnicode:
   proc createFileW*(lpFileName: WideCString, dwDesiredAccess, dwShareMode: DWORD,
@@ -627,7 +688,7 @@ else:
   proc createFileA*(lpFileName: cstring, dwDesiredAccess, dwShareMode: DWORD,
                     lpSecurityAttributes: pointer,
                     dwCreationDisposition, dwFlagsAndAttributes: DWORD,
-                    hTemplateFile: THANDLE): THANDLE {.
+                    hTemplateFile: Handle): Handle {.
       stdcall, dynlib: "kernel32", importc: "CreateFileA".}
   proc deleteFileA*(pathName: cstring): int32 {.
     importc: "DeleteFileA", dynlib: "kernel32", stdcall.}
@@ -657,10 +718,10 @@ proc createFileMappingW*(hFile: Handle,
   stdcall, dynlib: "kernel32", importc: "CreateFileMappingW".}
 
 when not useWinUnicode:
-  proc createFileMappingA*(hFile: THANDLE,
+  proc createFileMappingA*(hFile: Handle,
                            lpFileMappingAttributes: pointer,
                            flProtect, dwMaximumSizeHigh: DWORD,
-                           dwMaximumSizeLow: DWORD, lpName: cstring): THANDLE {.
+                           dwMaximumSizeLow: DWORD, lpName: cstring): Handle {.
       stdcall, dynlib: "kernel32", importc: "CreateFileMappingA".}
 
 proc unmapViewOfFile*(lpBaseAddress: pointer): WINBOOL {.stdcall,
@@ -723,6 +784,9 @@ template WSAIORW*(x,y): expr = (IOC_INOUT or x or y)
 const
   SIO_GET_EXTENSION_FUNCTION_POINTER* = WSAIORW(IOC_WS2,6).DWORD
   SO_UPDATE_ACCEPT_CONTEXT* = 0x700B
+  AI_V4MAPPED* = 0x0008
+  AF_INET* = 2
+  AF_INET6* = 23
 
 var
   WSAID_CONNECTEX*: GUID = GUID(D1: 0x25a207b9, D2: 0xddf3'i16, D3: 0x4660, D4: [
@@ -763,3 +827,54 @@ proc getSystemTimes*(lpIdleTime, lpKernelTime,
 proc getProcessTimes*(hProcess: Handle; lpCreationTime, lpExitTime,
   lpKernelTime, lpUserTime: var FILETIME): WINBOOL {.stdcall,
   dynlib: "kernel32", importc: "GetProcessTimes".}
+
+type inet_ntop_proc = proc(family: cint, paddr: pointer, pStringBuffer: cstring,
+                      stringBufSize: int32): cstring {.stdcall.}
+
+var inet_ntop_real: inet_ntop_proc = nil
+
+let l = loadLib(ws2dll)
+if l != nil:
+  inet_ntop_real = cast[inet_ntop_proc](symAddr(l, "inet_ntop"))
+
+proc WSAAddressToStringA(pAddr: ptr SockAddr, addrSize: DWORD, unused: pointer, pBuff: cstring, pBuffSize: ptr DWORD): cint {.stdcall, importc, dynlib: ws2dll.}
+proc inet_ntop_emulated(family: cint, paddr: pointer, pStringBuffer: cstring,
+                  stringBufSize: int32): cstring {.stdcall.} =
+    case family
+    of AF_INET:
+      var sa: Sockaddr_in
+      sa.sin_family = AF_INET
+      sa.sin_addr = cast[ptr InAddr](paddr)[]
+      var bs = stringBufSize.DWORD
+      let r = WSAAddressToStringA(cast[ptr SockAddr](sa.addr), sa.sizeof.DWORD, nil, pStringBuffer, bs.addr)
+      if r != 0:
+        result = nil
+      else:
+        result = pStringBuffer
+    of AF_INET6:
+      var sa: Sockaddr_in6
+      sa.sin6_family = AF_INET6
+      sa.sin6_addr = cast[ptr In6_addr](paddr)[]
+      var bs = stringBufSize.DWORD
+      let r = WSAAddressToStringA(cast[ptr SockAddr](sa.addr), sa.sizeof.DWORD, nil, pStringBuffer, bs.addr)
+      if r != 0:
+        result = nil
+      else:
+        result = pStringBuffer
+    else:
+      setLastError(ERROR_BAD_ARGUMENTS)
+      result = nil
+
+proc inet_ntop*(family: cint, paddr: pointer, pStringBuffer: cstring,
+                  stringBufSize: int32): cstring {.stdcall.} =
+  var ver: OSVERSIONINFO
+  ver.dwOSVersionInfoSize = sizeof(ver).DWORD
+  let res = when useWinUnicode: getVersionExW(ver.addr) else: getVersionExA(ver.addr)
+  if res == 0:
+    result = nil
+  elif ver.dwMajorVersion >= 6:
+    if inet_ntop_real == nil:
+      quit("Can't load inet_ntop proc from " & ws2dll)
+    result = inet_ntop_real(family, paddr, pStringBuffer, stringBufSize)
+  else:
+    result = inet_ntop_emulated(family, paddr, pStringBuffer, stringBufSize)

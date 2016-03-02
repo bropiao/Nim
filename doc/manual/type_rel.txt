@@ -191,7 +191,7 @@ Overloading resolution
 In a call ``p(args)`` the routine ``p`` that matches best is selected. If
 multiple routines match equally well, the ambiguity is reported at compiletime.
 
-Every arg in args needs to match. There are multiple different category how an
+Every arg in args needs to match. There are multiple different categories how an
 argument can match. Let ``f`` be the formal parameter's type and ``a`` the type
 of the argument.
 
@@ -294,6 +294,21 @@ If the formal parameter ``f`` is of type ``var T`` in addition to the ordinary
 type checking, the argument is checked to be an `l-value`:idx:. ``var T``
 matches better than just ``T`` then.
 
+.. code-block:: nim
+  proc sayHi(x: int): string =
+    # matches a non-var int
+    result = $x
+  proc sayHi(x: var int): string =
+    # matches a var int
+    result = $(x + 10)
+
+  proc sayHello(x: int) =
+    var m = x # a mutable version of x
+    echo sayHi(x) # matches the non-var version of sayHi
+    echo sayHi(m) # matches the var version of sayHi
+
+  sayHello(3) # 3
+              # 13
 
 Automatic dereferencing
 -----------------------

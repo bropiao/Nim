@@ -14,12 +14,12 @@
 
 import
   lists, ropes, os, strutils, osproc, platform, condsyms, options, msgs,
-  securehash
+  securehash, streams
 
 type
   TSystemCC* = enum
     ccNone, ccGcc, ccLLVM_Gcc, ccCLang, ccLcc, ccBcc, ccDmc, ccWcc, ccVcc,
-    ccTcc, ccPcc, ccUcc, ccIcl
+    ccTcc, ccPcc, ccUcc, ccIcl, asmFasm
   TInfoCCProp* = enum         # properties of the C compiler:
     hasSwitchRange,           # CC allows ranges in switch statements (GNU C)
     hasComputedGoto,          # CC has computed goto (GNU C extension)
@@ -123,7 +123,7 @@ compiler vcc:
     includeCmd: " /I",
     linkDirCmd: " /LIBPATH:",
     linkLibCmd: " $1.lib",
-    debug: " /GZ /Zi ",
+    debug: " /RTC1 /Z7 ",
     pic: "",
     asmStmtFrmt: "__asm{$n$1$n}$n",
     structStmtFmt: "$3$n$1 $2",
@@ -318,6 +318,31 @@ compiler ucc:
     packedPragma: "", # XXX: not supported yet
     props: {})
 
+# fasm assembler
+compiler fasm:
+  result = (
+    name: "fasm",
+    objExt: "o",
+    optSpeed: "",
+    optSize: "",
+    compilerExe: "fasm",
+    cppCompiler: "fasm",
+    compileTmpl: "$file $objfile",
+    buildGui: "",
+    buildDll: "",
+    buildLib: "",
+    linkerExe: "",
+    linkTmpl: "",
+    includeCmd: "",
+    linkDirCmd: "",
+    linkLibCmd: "",
+    debug: "",
+    pic: "",
+    asmStmtFrmt: "",
+    structStmtFmt: "",
+    packedPragma: "",
+    props: {})
+
 const
   CC*: array[succ(low(TSystemCC))..high(TSystemCC), TInfoCC] = [
     gcc(),
@@ -331,16 +356,21 @@ const
     tcc(),
     pcc(),
     ucc(),
-    icl()]
+    icl(),
+    fasm()]
 
   hExt* = ".h"
 
 var
   cCompiler* = ccGcc # the used compiler
+  cAssembler* = ccNone
   gMixedMode*: bool  # true if some module triggered C++ codegen
   cIncludes*: seq[string] = @[]   # directories to search for included files
   cLibs*: seq[string] = @[]       # directories to search for lib files
   cLinkedLibs*: seq[string] = @[] # libraries to link
+
+const
+  cValidAssemblers* = {asmFasm}
 
 # implementation
 
@@ -429,7 +459,7 @@ proc resetCompilationLists* =
   initLinkedList(toCompile)
   ## XXX: we must associate these with their originating module
   # when the module is loaded/unloaded it adds/removes its items
-  # That's because we still need to CRC check the external files
+  # That's because we still need to hash check the external files
   # Maybe we can do that in checkDep on the other hand?
   initLinkedList(externalToCompile)
   initLinkedList(toLink)
@@ -438,17 +468,13 @@ proc addFileToLink*(filename: string) =
   prependStr(toLink, filename)
   # BUGFIX: was ``appendStr``
 
-proc execWithEcho(cmd: string, prettyCmd = ""): int =
-  if optListCmd in gGlobalOptions or gVerbosity > 0:
-    if prettyCmd != "":
-      msgWriteln(prettyCmd)
-    else:
-      msgWriteln(cmd)
+proc execWithEcho(cmd: string, msg = hintExecuting): int =
+  rawMessage(msg, cmd)
   result = execCmd(cmd)
 
-proc execExternalProgram*(cmd: string, prettyCmd = "") =
-  if execWithEcho(cmd, prettyCmd) != 0:
-    rawMessage(errExecutionOfProgramFailed, "")
+proc execExternalProgram*(cmd: string, msg = hintExecuting) =
+  if execWithEcho(cmd, msg) != 0:
+    rawMessage(errExecutionOfProgramFailed, cmd)
 
 proc generateScript(projectFile: string, script: Rope) =
   let (dir, name, ext) = splitFile(projectFile)
@@ -531,6 +557,21 @@ proc getLinkerExe(compiler: TSystemCC): string =
 
 proc getCompileCFileCmd*(cfilename: string, isExternal = false): string =
   var c = cCompiler
+  if cfilename.endswith(".asm"):
+    var customAssembler = getConfigVar("assembler")
+    if customAssembler.len > 0:
+      c = nameToCC(customAssembler)
+    else:
+      if targetCPU == cpuI386 or targetCPU == cpuAmd64:
+        c = asmFasm
+      else:
+        c = ccNone
+
+    if c == ccNone:
+      rawMessage(errExternalAssemblerNotFound, "")
+    elif c notin cValidAssemblers:
+      rawMessage(errExternalAssemblerNotValid, customAssembler)
+
   var options = cFileSpecificOptions(cfilename)
   var exe = getConfigVar(c, ".exe")
   if exe.len == 0: exe = c.getCompilerExe
@@ -585,18 +626,18 @@ proc externalFileChanged(filename: string): bool =
   if gCmd notin {cmdCompileToC, cmdCompileToCpp, cmdCompileToOC, cmdCompileToLLVM}:
     return false
 
-  var crcFile = toGeneratedFile(filename.withPackageName, "crc")
-  var currentCrc = footprint(filename)
+  var hashFile = toGeneratedFile(filename.withPackageName, "sha1")
+  var currentHash = footprint(filename)
   var f: File
-  if open(f, crcFile, fmRead):
-    let oldCrc = parseSecureHash(f.readLine())
+  if open(f, hashFile, fmRead):
+    let oldHash = parseSecureHash(f.readLine())
     close(f)
-    result = oldCrc != currentCrc
+    result = oldHash != currentHash
   else:
     result = true
   if result:
-    if open(f, crcFile, fmWrite):
-      f.writeln($currentCrc)
+    if open(f, hashFile, fmWrite):
+      f.writeLine($currentHash)
       close(f)
 
 proc addExternalFileToCompile*(filename: string) =
@@ -631,6 +672,12 @@ proc callCCompiler*(projectfile: string) =
   var prettyCmds: TStringSeq = @[]
   let prettyCb = proc (idx: int) =
     echo prettyCmds[idx]
+  let runCb = proc (idx: int, p: Process) =
+    let exitCode = p.peekExitCode
+    if exitCode != 0:
+      rawMessage(errGenerated, "execution of an external compiler program '" &
+        cmds[idx] & "' failed with exit code: " & $exitCode & "\n\n" &
+        p.outputStream.readAll.strip)
   compileCFile(toCompile, script, cmds, prettyCmds, false)
   compileCFile(externalToCompile, script, cmds, prettyCmds, true)
   if optCompileOnly notin gGlobalOptions:
@@ -639,22 +686,19 @@ proc callCCompiler*(projectfile: string) =
     if gNumberOfProcessors <= 1:
       for i in countup(0, high(cmds)):
         res = execWithEcho(cmds[i])
-        if res != 0: rawMessage(errExecutionOfProgramFailed, [])
+        if res != 0: rawMessage(errExecutionOfProgramFailed, cmds[i])
     elif optListCmd in gGlobalOptions or gVerbosity > 1:
-      res = execProcesses(cmds, {poEchoCmd, poUsePath, poParentStreams},
-                          gNumberOfProcessors)
+      res = execProcesses(cmds, {poEchoCmd, poStdErrToStdOut, poUsePath, poParentStreams},
+                          gNumberOfProcessors, afterRunEvent=runCb)
     elif gVerbosity == 1:
-      res = execProcesses(cmds, {poUsePath, poParentStreams},
-                          gNumberOfProcessors, prettyCb)
+      res = execProcesses(cmds, {poStdErrToStdOut, poUsePath, poParentStreams},
+                          gNumberOfProcessors, prettyCb, afterRunEvent=runCb)
     else:
-      res = execProcesses(cmds, {poUsePath, poParentStreams},
-                          gNumberOfProcessors)
+      res = execProcesses(cmds, {poStdErrToStdOut, poUsePath, poParentStreams},
+                          gNumberOfProcessors, afterRunEvent=runCb)
     if res != 0:
       if gNumberOfProcessors <= 1:
-        rawMessage(errExecutionOfProgramFailed, [])
-      else:
-        rawMessage(errGenerated, " execution of an external program failed; " &
-                   "rerun with --parallelBuild:1 to see the error message")
+        rawMessage(errExecutionOfProgramFailed, cmds.join())
   if optNoLinking notin gGlobalOptions:
     # call the linker:
     var it = PStrEntry(toLink.head)
@@ -687,6 +731,8 @@ proc callCCompiler*(projectfile: string) =
         builddll = ""
       if options.outFile.len > 0:
         exefile = options.outFile.expandTilde
+        if not exefile.isAbsolute():
+          exefile = getCurrentDir() / exefile
       if not noAbsolutePaths():
         if not exefile.isAbsolute():
           exefile = joinPath(splitFile(projectfile).dir, exefile)
@@ -703,10 +749,8 @@ proc callCCompiler*(projectfile: string) =
           "nim", quoteShell(getPrefixDir()),
           "lib", quoteShell(libpath)])
     if optCompileOnly notin gGlobalOptions:
-      if gVerbosity == 1:
-        execExternalProgram(linkCmd, "[Linking]")
-      else:
-        execExternalProgram(linkCmd)
+      execExternalProgram(linkCmd,
+                          if gVerbosity > 1: hintExecuting else: hintLinking)
   else:
     linkCmd = ""
   if optGenScript in gGlobalOptions:

@@ -30,6 +30,7 @@ type
                               # statements
     owner*: PSym              # the symbol this context belongs to
     resultSym*: PSym          # the result symbol (if we are in a proc)
+    selfSym*: PSym            # the 'self' symbol (if available)
     nestedLoopCounter*: int   # whether we are in a loop or not
     nestedBlockCounter*: int  # whether we are in a block or not
     inTryStmt*: int           # whether we are in a try statement; works also
@@ -45,7 +46,8 @@ type
   TExprFlag* = enum
     efLValue, efWantIterator, efInTypeof,
     efWantStmt, efAllowStmt, efDetermineType,
-    efAllowDestructor, efWantValue, efOperand, efNoSemCheck
+    efAllowDestructor, efWantValue, efOperand, efNoSemCheck,
+    efNoProcvarCheck
   TExprFlags* = set[TExprFlag]
 
   TTypeAttachedOp* = enum
@@ -70,7 +72,8 @@ type
     inTypeClass*: int          # > 0 if we are in a user-defined type class
     inGenericContext*: int     # > 0 if we are in a generic type
     inUnrolledContext*: int    # > 0 if we are unrolling a loop
-    inCompilesContext*: int    # > 0 if we are in a ``compiles`` magic
+    compilesContextId*: int    # > 0 if we are in a ``compiles`` magic
+    compilesContextIdGenerator*: int
     inGenericInst*: int        # > 0 if we are instantiating a generic
     converters*: TSymSeq       # sequence of converters
     patterns*: TSymSeq         # sequence of pattern matchers
@@ -101,7 +104,8 @@ type
     inParallelStmt*: int
     instTypeBoundOp*: proc (c: PContext; dc: PSym; t: PType; info: TLineInfo;
                             op: TTypeAttachedOp): PSym {.nimcall.}
-
+    selfName*: PIdent
+    signatures*: TStrTable
 
 proc makeInstPair*(s: PSym, inst: PInstantiation): TInstantiationPair =
   result.genericSym = s
@@ -152,16 +156,6 @@ proc popOwner() =
 proc lastOptionEntry(c: PContext): POptionEntry =
   result = POptionEntry(c.optionStack.tail)
 
-proc pushProcCon*(c: PContext, owner: PSym) {.inline.} =
-  if owner == nil:
-    internalError("owner is nil")
-    return
-  var x: PProcCon
-  new(x)
-  x.owner = owner
-  x.next = c.p
-  c.p = x
-
 proc popProcCon*(c: PContext) {.inline.} = c.p = c.p.next
 
 proc newOptionEntry(): POptionEntry =
@@ -185,6 +179,8 @@ proc newContext(module: PSym): PContext =
   initStrTable(result.userPragmas)
   result.generics = @[]
   result.unknownIdents = initIntSet()
+  initStrTable(result.signatures)
+
 
 proc inclSym(sq: var TSymSeq, s: PSym) =
   var L = len(sq)
@@ -313,7 +309,7 @@ proc makeRangeType*(c: PContext; first, last: BiggestInt;
   addSonSkipIntLit(result, intType) # basetype of range
 
 proc markIndirect*(c: PContext, s: PSym) {.inline.} =
-  if s.kind in {skProc, skConverter, skMethod, skIterator, skClosureIterator}:
+  if s.kind in {skProc, skConverter, skMethod, skIterator}:
     incl(s.flags, sfAddrTaken)
     # XXX add to 'c' for global analysis
 

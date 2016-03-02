@@ -28,6 +28,8 @@
 import
   pcre, strutils, rtarrays
 
+{.deprecated.}
+
 const
   MaxSubpatterns* = 20
     ## defines the maximum number of subpatterns that can be captured.
@@ -41,12 +43,12 @@ type
     reExtended = 3,      ## ignore whitespace and ``#`` comments
     reStudy = 4          ## study the expression (may be omitted if the
                          ## expression will be used only once)
-  
-  RegexDesc = object 
+
+  RegexDesc = object
     h: ptr Pcre
     e: ptr ExtraData
-  
-  Regex* {.deprecated.} = ref RegexDesc ## a compiled regular expression
+
+  Regex* = ref RegexDesc ## a compiled regular expression
 
   RegexError* = object of ValueError
     ## is raised if the pattern is no valid regular expression.
@@ -369,7 +371,7 @@ iterator split*(s: string, sep: Regex): string =
   ##
   ## .. code-block:: nim
   ##   for word in split("00232this02939is39an22example111", re"\d+"):
-  ##     writeln(stdout, word)
+  ##     writeLine(stdout, word)
   ##
   ## Results in:
   ##

@@ -63,6 +63,52 @@ proc lowerTupleUnpacking*(n: PNode; owner: PSym): PNode =
     if n.sons[i].kind == nkSym: v.addVar(n.sons[i])
     result.add newAsgnStmt(n.sons[i], newTupleAccess(tempAsNode, i))
 
+proc newTupleAccessRaw*(tup: PNode, i: int): PNode =
+  result = newNodeI(nkBracketExpr, tup.info)
+  addSon(result, copyTree(tup))
+  var lit = newNodeI(nkIntLit, tup.info)
+  lit.intVal = i
+  addSon(result, lit)
+
+proc lowerTupleUnpackingForAsgn*(n: PNode; owner: PSym): PNode =
+  let value = n.lastSon
+  result = newNodeI(nkStmtList, n.info)
+
+  var temp = newSym(skTemp, getIdent(genPrefix), owner, value.info)
+  var v = newNodeI(nkLetSection, value.info)
+  let tempAsNode = newIdentNode(getIdent(genPrefix & $temp.id), value.info)
+
+  var vpart = newNodeI(nkIdentDefs, tempAsNode.info, 3)
+  vpart.sons[0] = tempAsNode
+  vpart.sons[1] = ast.emptyNode
+  vpart.sons[2] = value
+  addSon(v, vpart)
+  result.add(v)
+
+  let lhs = n.sons[0]
+  for i in 0 .. lhs.len-1:
+    result.add newAsgnStmt(lhs.sons[i], newTupleAccessRaw(tempAsNode, i))
+
+proc lowerSwap*(n: PNode; owner: PSym): PNode =
+  result = newNodeI(nkStmtList, n.info)
+  # note: cannot use 'skTemp' here cause we really need the copy for the VM :-(
+  var temp = newSym(skVar, getIdent(genPrefix), owner, n.info)
+  temp.typ = n.sons[1].typ
+  incl(temp.flags, sfFromGeneric)
+
+  var v = newNodeI(nkVarSection, n.info)
+  let tempAsNode = newSymNode(temp)
+
+  var vpart = newNodeI(nkIdentDefs, v.info, 3)
+  vpart.sons[0] = tempAsNode
+  vpart.sons[1] = ast.emptyNode
+  vpart.sons[2] = n[1]
+  addSon(v, vpart)
+
+  result.add(v)
+  result.add newFastAsgnStmt(n[1], n[2])
+  result.add newFastAsgnStmt(n[2], tempAsNode)
+
 proc createObj*(owner: PSym, info: TLineInfo): PType =
   result = newType(tyObject, owner)
   rawAddSon(result, nil)
@@ -119,9 +165,10 @@ proc indirectAccess*(a: PNode, b: string, info: TLineInfo): PNode =
   deref.typ = a.typ.skipTypes(abstractInst).sons[0]
   var t = deref.typ.skipTypes(abstractInst)
   var field: PSym
+  let bb = getIdent(b)
   while true:
     assert t.kind == tyObject
-    field = getSymFromList(t.n, getIdent(b))
+    field = getSymFromList(t.n, bb)
     if field != nil: break
     t = t.sons[0]
     if t == nil: break
@@ -167,7 +214,7 @@ proc genDeref*(n: PNode): PNode =
   result.add n
 
 proc callCodegenProc*(name: string, arg1: PNode;
-                      arg2, arg3: PNode = nil): PNode =
+                      arg2, arg3, optionalArgs: PNode = nil): PNode =
   result = newNodeI(nkCall, arg1.info)
   let sym = magicsys.getCompilerProc(name)
   if sym == nil:
@@ -177,6 +224,9 @@ proc callCodegenProc*(name: string, arg1: PNode;
     result.add arg1
     if arg2 != nil: result.add arg2
     if arg3 != nil: result.add arg3
+    if optionalArgs != nil:
+      for i in 1..optionalArgs.len-3:
+        result.add optionalArgs[i]
     result.typ = sym.typ.sons[0]
 
 proc callProc(a: PNode): PNode =
@@ -483,7 +533,7 @@ proc wrapProcForSpawn*(owner: PSym; spawnExpr: PNode; retType: PType;
                        barrier, dest: PNode = nil): PNode =
   # if 'barrier' != nil, then it is in a 'parallel' section and we
   # generate quite different code
-  let n = spawnExpr[1]
+  let n = spawnExpr[^2]
   let spawnKind = spawnResult(retType, barrier!=nil)
   case spawnKind
   of srVoid:
@@ -536,7 +586,7 @@ proc wrapProcForSpawn*(owner: PSym; spawnExpr: PNode; retType: PType;
     objType.addField(field)
     result.add newFastAsgnStmt(newDotExpr(scratchObj, field), n[0])
     fn = indirectAccess(castExpr, field, n.info)
-  elif fn.kind == nkSym and fn.sym.kind in {skClosureIterator, skIterator}:
+  elif fn.kind == nkSym and fn.sym.kind == skIterator:
     localError(n.info, "iterator in spawn environment is not allowed")
   elif fn.typ.callConv == ccClosure:
     localError(n.info, "closure in spawn environment is not allowed")
@@ -569,7 +619,7 @@ proc wrapProcForSpawn*(owner: PSym; spawnExpr: PNode; retType: PType;
     fvField = newDotExpr(scratchObj, field)
     fvAsExpr = indirectAccess(castExpr, field, n.info)
     # create flowVar:
-    result.add newFastAsgnStmt(fvField, callProc(spawnExpr[2]))
+    result.add newFastAsgnStmt(fvField, callProc(spawnExpr[^1]))
     if barrier == nil:
       result.add callCodegenProc("nimFlowVarCreateSemaphore", fvField)
 
@@ -584,7 +634,7 @@ proc wrapProcForSpawn*(owner: PSym; spawnExpr: PNode; retType: PType;
   let wrapper = createWrapperProc(fn, threadParam, argsParam,
                                   varSection, varInit, call,
                                   barrierAsExpr, fvAsExpr, spawnKind)
-  result.add callCodegenProc("nimSpawn", wrapper.newSymNode,
-                             genAddrOf(scratchObj.newSymNode))
+  result.add callCodegenProc("nimSpawn" & $spawnExpr.len, wrapper.newSymNode,
+                             genAddrOf(scratchObj.newSymNode), nil, spawnExpr)
 
   if spawnKind == srFlowVar: result.add fvField

@@ -16,7 +16,7 @@ import
   procfind, lookups, rodread, pragmas, passes, semdata, semtypinst, sigmatch,
   intsets, transf, vmdef, vm, idgen, aliases, cgmeth, lambdalifting,
   evaltempl, patterns, parampatterns, sempass2, nimfix.pretty, semmacrosanity,
-  semparallel, lowerings, plugins, plugins.active
+  semparallel, lowerings, pluginsupport, plugins.active
 
 when defined(nimfix):
   import nimfix.prettybase
@@ -61,8 +61,8 @@ template semIdeForTemplateOrGeneric(c: PContext; n: PNode;
   when defined(nimsuggest):
     assert gCmd == cmdIdeTools
     if requiresCheck:
-      if optIdeDebug in gGlobalOptions:
-        echo "passing to safeSemExpr: ", renderTree(n)
+      #if optIdeDebug in gGlobalOptions:
+      #  echo "passing to safeSemExpr: ", renderTree(n)
       discard safeSemExpr(c, n)
 
 proc typeMismatch(n: PNode, formal, actual: PType) =
@@ -171,21 +171,27 @@ proc newSymS(kind: TSymKind, n: PNode, c: PContext): PSym =
   result = newSym(kind, considerQuotedIdent(n), getCurrOwner(), n.info)
 
 proc newSymG*(kind: TSymKind, n: PNode, c: PContext): PSym =
+  proc `$`(kind: TSymKind): string = substr(system.`$`(kind), 2).toLower
+
   # like newSymS, but considers gensym'ed symbols
   if n.kind == nkSym:
     # and sfGenSym in n.sym.flags:
     result = n.sym
-    internalAssert result.kind == kind
+    if result.kind != kind:
+      localError(n.info, "cannot use symbol of kind '" &
+                 $result.kind & "' as a '" & $kind & "'")
     # when there is a nested proc inside a template, semtmpl
     # will assign a wrong owner during the first pass over the
     # template; we must fix it here: see #909
     result.owner = getCurrOwner()
   else:
     result = newSym(kind, considerQuotedIdent(n), getCurrOwner(), n.info)
+  #if kind in {skForVar, skLet, skVar} and result.owner.kind == skModule:
+  #  incl(result.flags, sfGlobal)
 
 proc semIdentVis(c: PContext, kind: TSymKind, n: PNode,
                  allowed: TSymFlags): PSym
-  # identifier with visability
+  # identifier with visibility
 proc semIdentWithPragma(c: PContext, kind: TSymKind, n: PNode,
                         allowed: TSymFlags): PSym
 proc semStmtScope(c: PContext, n: PNode): PNode
@@ -198,7 +204,7 @@ proc typeAllowedCheck(info: TLineInfo; typ: PType; kind: TSymKind) =
                            "' in this context: '" & typeToString(typ) & "'")
 
 proc paramsTypeCheck(c: PContext, typ: PType) {.inline.} =
-  typeAllowedCheck(typ.n.info, typ, skConst)
+  typeAllowedCheck(typ.n.info, typ, skProc)
 
 proc expectMacroOrTemplateCall(c: PContext, n: PNode): PSym
 proc semDirectOp(c: PContext, n: PNode, flags: TExprFlags): PNode
@@ -421,7 +427,11 @@ proc myOpenCached(module: PSym, rd: PRodReader): PPassContext =
   for m in items(rd.methods): methodDef(m, true)
 
 proc semStmtAndGenerateGenerics(c: PContext, n: PNode): PNode =
-  result = semStmt(c, n)
+  if sfNoForward in c.module.flags:
+    result = semAllTypeSections(c, n)
+  else:
+    result = n
+  result = semStmt(c, result)
   # BUGFIX: process newly generated generics here, not at the end!
   if c.lastGenericIdx < c.generics.len:
     var a = newNodeI(nkStmtList, n.info)
@@ -433,6 +443,8 @@ proc semStmtAndGenerateGenerics(c: PContext, n: PNode): PNode =
   result = hloStmt(c, result)
   if gCmd == cmdInteractive and not isEmptyType(result.typ):
     result = buildEchoStmt(c, result)
+  if gCmd == cmdIdeTools:
+    appendToModule(c.module, result)
   result = transformStmt(c.module, result)
 
 proc recoverContext(c: PContext) =
@@ -475,4 +487,3 @@ proc myClose(context: PPassContext, n: PNode): PNode =
   popProcCon(c)
 
 const semPass* = makePass(myOpen, myOpenCached, myProcess, myClose)
-

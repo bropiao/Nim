@@ -117,7 +117,7 @@ proc dbgRepr(p: pointer, typ: PNimType): string =
 proc writeVariable(stream: File, slot: VarSlot) =
   write(stream, slot.name)
   write(stream, " = ")
-  writeln(stream, dbgRepr(slot.address, slot.typ))
+  writeLine(stream, dbgRepr(slot.address, slot.typ))
 
 proc listFrame(stream: File, f: PFrame) =
   write(stream, EndbBeg)
@@ -125,7 +125,7 @@ proc listFrame(stream: File, f: PFrame) =
   write(stream, f.len)
   write(stream, " slots):\n")
   for i in 0 .. f.len-1:
-    writeln(stream, getLocal(f, i).name)
+    writeLine(stream, getLocal(f, i).name)
   write(stream, EndbEnd)
 
 proc listLocals(stream: File, f: PFrame) =
@@ -141,7 +141,7 @@ proc listGlobals(stream: File) =
   write(stream, EndbBeg)
   write(stream, "| Globals:\n")
   for i in 0 .. getGlobalLen()-1:
-    writeln(stream, getGlobal(i).name)
+    writeLine(stream, getGlobal(i).name)
   write(stream, EndbEnd)
 
 proc debugOut(msg: cstring) =
@@ -298,7 +298,7 @@ proc dbgEvaluate(stream: File, s: cstring, start: int, f: PFrame) =
     for i in 0 .. f.len-1:
       let v = getLocal(f, i)
       if c_strcmp(v.name, dbgTemp.data) == 0:
-        writeVariable(stream, v)  
+        writeVariable(stream, v)
 
 proc dbgOut(s: cstring, start: int, currFrame: PFrame) =
   var dbgTemp: StaticStr
@@ -396,7 +396,13 @@ proc commandPrompt() =
       again = false
       quit(1) # BUGFIX: quit with error code > 0
     elif ?"e" or ?"eval":
+      var
+        prevState = dbgState
+        prevSkipFrame = dbgSkipToFrame
+      dbgState = dbSkipCurrent
       dbgEvaluate(stdout, dbgUser.data, i, dbgFramePtr)
+      dbgState = prevState
+      dbgSkipToFrame = prevSkipFrame
     elif ?"o" or ?"out":
       dbgOut(dbgUser.data, i, dbgFramePtr)
     elif ?"stackframe":
@@ -404,9 +410,21 @@ proc commandPrompt() =
     elif ?"w" or ?"where":
       dbgShowExecutionPoint()
     elif ?"l" or ?"locals":
+      var
+        prevState = dbgState
+        prevSkipFrame = dbgSkipToFrame
+      dbgState = dbSkipCurrent
       listLocals(stdout, dbgFramePtr)
+      dbgState = prevState
+      dbgSkipToFrame = prevSkipFrame
     elif ?"g" or ?"globals":
+      var
+        prevState = dbgState
+        prevSkipFrame = dbgSkipToFrame
+      dbgState = dbSkipCurrent
       listGlobals(stdout)
+      dbgState = prevState
+      dbgSkipToFrame = prevSkipFrame
     elif ?"u" or ?"up":
       if dbgDown <= 0:
         debugOut("[Warning] cannot go up any further ")
@@ -484,7 +502,7 @@ proc dbgWriteStackTrace(f: PFrame) =
     inc(i)
     b = b.prev
   for j in countdown(i-1, 0):
-    if tempFrames[j] == nil: 
+    if tempFrames[j] == nil:
       write(stdout, "(")
       write(stdout, skipped)
       write(stdout, " calls omitted) ...")

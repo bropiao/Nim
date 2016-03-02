@@ -11,6 +11,26 @@
 ## the `FileStream` and the `StringStream` which implement the stream
 ## interface for Nim file objects (`File`) and strings. Other modules
 ## may provide other implementations for this standard stream interface.
+##
+## Examples:
+##
+## .. code-block:: Nim
+##
+##  import streams
+##  var
+##    ss = newStringStream("""The first line
+##  the second line
+##  the third line""")
+##    line = ""
+##  while ss.readLine(line):
+##    echo line
+##  ss.close()
+##
+##  var fs = newFileStream("somefile.txt", fmRead)
+##  if not isNil(fs):
+##    while fs.readLine(line):
+##      echo line
+##    fs.close()
 
 include "system/inclrtl"
 
@@ -81,6 +101,19 @@ proc readData*(s: Stream, buffer: pointer, bufLen: int): int =
   ## low level proc that reads data into an untyped `buffer` of `bufLen` size.
   result = s.readDataImpl(s, buffer, bufLen)
 
+proc readAll*(s: Stream): string =
+  ## Reads all available data.
+  const bufferSize = 1000
+  result = newString(bufferSize)
+  var r = 0
+  while true:
+    let readBytes = readData(s, addr(result[r]), bufferSize)
+    if readBytes < bufferSize:
+      setLen(result, r+readBytes)
+      break
+    inc r, bufferSize
+    setLen(result, r+bufferSize)
+
 proc readData*(s, unused: Stream, buffer: pointer,
                bufLen: int): int {.deprecated.} =
   ## low level proc that reads data into an untyped `buffer` of `bufLen` size.
@@ -115,9 +148,17 @@ proc write*[T](s: Stream, x: T) =
 proc write*(s: Stream, x: string) =
   ## writes the string `x` to the the stream `s`. No length field or
   ## terminating zero is written.
-  writeData(s, cstring(x), x.len)
+  when nimvm:
+    writeData(s, cstring(x), x.len)
+  else:
+    if x.len > 0: writeData(s, unsafeAddr x[0], x.len)
 
-proc writeln*(s: Stream, args: varargs[string, `$`]) =
+proc writeLn*(s: Stream, args: varargs[string, `$`]) {.deprecated.} =
+  ## **Deprecated since version 0.11.4:** Use **writeLine** instead.
+  for str in args: write(s, str)
+  write(s, "\n")
+
+proc writeLine*(s: Stream, args: varargs[string, `$`]) =
   ## writes one or more strings to the the stream `s` followed
   ## by a new line. No length field or terminating zero is written.
   for str in args: write(s, str)
@@ -148,7 +189,7 @@ proc readBool*(s: Stream): bool =
   read(s, result)
 
 proc peekBool*(s: Stream): bool =
-  ## peeks a bool from the stream `s`. Raises `EIO` if an error occured.
+  ## peeks a bool from the stream `s`. Raises `EIO` if an error occurred.
   peek(s, result)
 
 proc readInt8*(s: Stream): int8 =
@@ -366,7 +407,7 @@ when not defined(js):
     result.writeDataImpl = fsWriteData
     result.flushImpl = fsFlush
 
-  proc newFileStream*(filename: string, mode: FileMode): FileStream =
+  proc newFileStream*(filename: string, mode: FileMode = fmRead): FileStream =
     ## creates a new stream from the file named `filename` with the mode `mode`.
     ## If the file cannot be opened, nil is returned. See the `system
     ## <system.html>`_ module for a list of available FileMode enums.
