@@ -36,6 +36,8 @@ type
   DWORD* = int32
   PDWORD* = ptr DWORD
   LPINT* = ptr int32
+  ULONG_PTR* = uint
+  PULONG_PTR* = ptr uint
   HDC* = Handle
   HGLRC* = Handle
 
@@ -92,7 +94,7 @@ type
     dwMinorVersion*: DWORD
     dwBuildNumber*: DWORD
     dwPlatformId*: DWORD
-    szCSDVersion*: array[0..127, WinChar];
+    szCSDVersion*: array[0..127, WinChar]
 
 {.deprecated: [THandle: Handle, TSECURITY_ATTRIBUTES: SECURITY_ATTRIBUTES,
     TSTARTUPINFO: STARTUPINFO, TPROCESS_INFORMATION: PROCESS_INFORMATION,
@@ -412,7 +414,7 @@ const
   FD_SETSIZE* = 64
   MSG_PEEK* = 2
 
-  INADDR_ANY* = 0
+  INADDR_ANY* = 0'u32
   INADDR_LOOPBACK* = 0x7F000001
   INADDR_BROADCAST* = -1
   INADDR_NONE* = -1
@@ -440,23 +442,25 @@ type
     sa_family*: int16 # unsigned
     sa_data: array[0..13, char]
 
+  PSockAddr = ptr SockAddr
+
   InAddr* {.importc: "IN_ADDR", header: "winsock2.h".} = object
-    s_addr*: int32  # IP address
+    s_addr*: uint32  # IP address
 
   Sockaddr_in* {.importc: "SOCKADDR_IN",
                   header: "winsock2.h".} = object
     sin_family*: int16
-    sin_port*: int16 # unsigned
+    sin_port*: uint16
     sin_addr*: InAddr
     sin_zero*: array[0..7, char]
 
   In6_addr* {.importc: "IN6_ADDR", header: "winsock2.h".} = object
-    bytes*: array[0..15, char]
+    bytes* {.importc: "u.Byte".}: array[0..15, char]
 
   Sockaddr_in6* {.importc: "SOCKADDR_IN6",
                    header: "ws2tcpip.h".} = object
     sin6_family*: int16
-    sin6_port*: int16 # unsigned
+    sin6_port*: uint16
     sin6_flowinfo*: int32 # unsigned
     sin6_addr*: In6_addr
     sin6_scope_id*: int32 # unsigned
@@ -516,6 +520,8 @@ var
   SO_DEBUG* {.importc, header: "winsock2.h".}: cint ## turn on debugging info recording
   SO_ACCEPTCONN* {.importc, header: "winsock2.h".}: cint # socket has had listen()
   SO_REUSEADDR* {.importc, header: "winsock2.h".}: cint # allow local address reuse
+  SO_REUSEPORT* {.importc: "SO_REUSEADDR", header: "winsock2.h".}: cint # allow port reuse. Since Windows does not really support it, mapped to SO_REUSEADDR. This shouldn't cause problems.
+
   SO_KEEPALIVE* {.importc, header: "winsock2.h".}: cint # keep connections alive
   SO_DONTROUTE* {.importc, header: "winsock2.h".}: cint # just use interface addresses
   SO_BROADCAST* {.importc, header: "winsock2.h".}: cint # permit sending of broadcast msgs
@@ -590,7 +596,7 @@ proc getnameinfo*(a1: ptr SockAddr, a2: SockLen,
                   a6: SockLen, a7: cint): cint {.
   stdcall, importc: "getnameinfo", dynlib: ws2dll.}
 
-proc inet_addr*(cp: cstring): int32 {.
+proc inet_addr*(cp: cstring): uint32 {.
   stdcall, importc: "inet_addr", dynlib: ws2dll.}
 
 proc WSAFDIsSet(s: SocketHandle, set: var TFdSet): bool {.
@@ -744,7 +750,7 @@ type
     D1*: int32
     D2*: int16
     D3*: int16
-    D4*: array [0..7, int8]
+    D4*: array[0..7, int8]
 {.deprecated: [TOVERLAPPED: OVERLAPPED, TGUID: GUID].}
 
 const
@@ -757,21 +763,28 @@ const
   WSAENETRESET* = 10052
   WSAETIMEDOUT* = 10060
   ERROR_NETNAME_DELETED* = 64
+  STATUS_PENDING* = 0x103
 
 proc createIoCompletionPort*(FileHandle: Handle, ExistingCompletionPort: Handle,
-                             CompletionKey: DWORD,
+                             CompletionKey: ULONG_PTR,
                              NumberOfConcurrentThreads: DWORD): Handle{.stdcall,
     dynlib: "kernel32", importc: "CreateIoCompletionPort".}
 
 proc getQueuedCompletionStatus*(CompletionPort: Handle,
-    lpNumberOfBytesTransferred: PDWORD, lpCompletionKey: PULONG,
+    lpNumberOfBytesTransferred: PDWORD, lpCompletionKey: PULONG_PTR,
                                 lpOverlapped: ptr POVERLAPPED,
                                 dwMilliseconds: DWORD): WINBOOL{.stdcall,
     dynlib: "kernel32", importc: "GetQueuedCompletionStatus".}
 
-proc getOverlappedResult*(hFile: Handle, lpOverlapped: OVERLAPPED,
+proc getOverlappedResult*(hFile: Handle, lpOverlapped: POVERLAPPED,
               lpNumberOfBytesTransferred: var DWORD, bWait: WINBOOL): WINBOOL{.
     stdcall, dynlib: "kernel32", importc: "GetOverlappedResult".}
+
+# this is copy of HasOverlappedIoCompleted() macro from <winbase.h>
+# because we have declared own OVERLAPPED structure with member names not
+# compatible with original names.
+template hasOverlappedIoCompleted*(lpOverlapped): bool =
+  (cast[uint](lpOverlapped.internal) != STATUS_PENDING)
 
 const
  IOC_OUT* = 0x40000000
@@ -812,10 +825,22 @@ proc WSARecv*(s: SocketHandle, buf: ptr TWSABuf, bufCount: DWORD,
   completionProc: POVERLAPPED_COMPLETION_ROUTINE): cint {.
   stdcall, importc: "WSARecv", dynlib: "Ws2_32.dll".}
 
+proc WSARecvFrom*(s: SocketHandle, buf: ptr TWSABuf, bufCount: DWORD,
+                  bytesReceived: PDWORD, flags: PDWORD, name: ptr SockAddr,
+                  namelen: ptr cint, lpOverlapped: POVERLAPPED,
+                  completionProc: POVERLAPPED_COMPLETION_ROUTINE): cint {.
+     stdcall, importc: "WSARecvFrom", dynlib: "Ws2_32.dll".}
+
 proc WSASend*(s: SocketHandle, buf: ptr TWSABuf, bufCount: DWORD,
   bytesSent: PDWORD, flags: DWORD, lpOverlapped: POVERLAPPED,
   completionProc: POVERLAPPED_COMPLETION_ROUTINE): cint {.
   stdcall, importc: "WSASend", dynlib: "Ws2_32.dll".}
+
+proc WSASendTo*(s: SocketHandle, buf: ptr TWSABuf, bufCount: DWORD,
+                bytesSent: PDWORD, flags: DWORD, name: ptr SockAddr,
+                namelen: cint, lpOverlapped: POVERLAPPED,
+                completionProc: POVERLAPPED_COMPLETION_ROUTINE): cint {.
+     stdcall, importc: "WSASendTo", dynlib: "Ws2_32.dll".}
 
 proc get_osfhandle*(fd:FileHandle): Handle {.
   importc: "_get_osfhandle", header:"<io.h>".}
@@ -833,37 +858,37 @@ type inet_ntop_proc = proc(family: cint, paddr: pointer, pStringBuffer: cstring,
 
 var inet_ntop_real: inet_ntop_proc = nil
 
-let l = loadLib(ws2dll)
-if l != nil:
-  inet_ntop_real = cast[inet_ntop_proc](symAddr(l, "inet_ntop"))
+let ws2 = loadLib(ws2dll)
+if ws2 != nil:
+  inet_ntop_real = cast[inet_ntop_proc](symAddr(ws2, "inet_ntop"))
 
 proc WSAAddressToStringA(pAddr: ptr SockAddr, addrSize: DWORD, unused: pointer, pBuff: cstring, pBuffSize: ptr DWORD): cint {.stdcall, importc, dynlib: ws2dll.}
 proc inet_ntop_emulated(family: cint, paddr: pointer, pStringBuffer: cstring,
                   stringBufSize: int32): cstring {.stdcall.} =
-    case family
-    of AF_INET:
-      var sa: Sockaddr_in
-      sa.sin_family = AF_INET
-      sa.sin_addr = cast[ptr InAddr](paddr)[]
-      var bs = stringBufSize.DWORD
-      let r = WSAAddressToStringA(cast[ptr SockAddr](sa.addr), sa.sizeof.DWORD, nil, pStringBuffer, bs.addr)
-      if r != 0:
-        result = nil
-      else:
-        result = pStringBuffer
-    of AF_INET6:
-      var sa: Sockaddr_in6
-      sa.sin6_family = AF_INET6
-      sa.sin6_addr = cast[ptr In6_addr](paddr)[]
-      var bs = stringBufSize.DWORD
-      let r = WSAAddressToStringA(cast[ptr SockAddr](sa.addr), sa.sizeof.DWORD, nil, pStringBuffer, bs.addr)
-      if r != 0:
-        result = nil
-      else:
-        result = pStringBuffer
-    else:
-      setLastError(ERROR_BAD_ARGUMENTS)
+  case family
+  of AF_INET:
+    var sa: Sockaddr_in
+    sa.sin_family = AF_INET
+    sa.sin_addr = cast[ptr InAddr](paddr)[]
+    var bs = stringBufSize.DWORD
+    let r = WSAAddressToStringA(cast[ptr SockAddr](sa.addr), sa.sizeof.DWORD, nil, pStringBuffer, bs.addr)
+    if r != 0:
       result = nil
+    else:
+      result = pStringBuffer
+  of AF_INET6:
+    var sa: Sockaddr_in6
+    sa.sin6_family = AF_INET6
+    sa.sin6_addr = cast[ptr In6_addr](paddr)[]
+    var bs = stringBufSize.DWORD
+    let r = WSAAddressToStringA(cast[ptr SockAddr](sa.addr), sa.sizeof.DWORD, nil, pStringBuffer, bs.addr)
+    if r != 0:
+      result = nil
+    else:
+      result = pStringBuffer
+  else:
+    setLastError(ERROR_BAD_ARGUMENTS)
+    result = nil
 
 proc inet_ntop*(family: cint, paddr: pointer, pStringBuffer: cstring,
                   stringBufSize: int32): cstring {.stdcall.} =
@@ -878,3 +903,136 @@ proc inet_ntop*(family: cint, paddr: pointer, pStringBuffer: cstring,
     result = inet_ntop_real(family, paddr, pStringBuffer, stringBufSize)
   else:
     result = inet_ntop_emulated(family, paddr, pStringBuffer, stringBufSize)
+
+type
+  WSAPROC_ACCEPTEX* = proc (sListenSocket: SocketHandle,
+                            sAcceptSocket: SocketHandle,
+                            lpOutputBuffer: pointer, dwReceiveDataLength: DWORD,
+                            dwLocalAddressLength: DWORD,
+                            dwRemoteAddressLength: DWORD,
+                            lpdwBytesReceived: ptr DWORD,
+                            lpOverlapped: POVERLAPPED): bool {.
+                            stdcall,gcsafe.}
+
+  WSAPROC_CONNECTEX* = proc (s: SocketHandle, name: ptr SockAddr, namelen: cint,
+                             lpSendBuffer: pointer, dwSendDataLength: DWORD,
+                             lpdwBytesSent: ptr DWORD,
+                             lpOverlapped: POVERLAPPED): bool {.
+                             stdcall,gcsafe.}
+
+  WSAPROC_GETACCEPTEXSOCKADDRS* = proc(lpOutputBuffer: pointer,
+                                       dwReceiveDataLength: DWORD,
+                                       dwLocalAddressLength: DWORD,
+                                       dwRemoteAddressLength: DWORD,
+                                       LocalSockaddr: ptr PSockAddr,
+                                       LocalSockaddrLength: ptr cint,
+                                       RemoteSockaddr: ptr PSockAddr,
+                                       RemoteSockaddrLength: ptr cint) {.
+                                       stdcall,gcsafe.}
+
+const
+  WT_EXECUTEDEFAULT* = 0x00000000'i32
+  WT_EXECUTEINIOTHREAD* = 0x00000001'i32
+  WT_EXECUTEINUITHREAD* = 0x00000002'i32
+  WT_EXECUTEINWAITTHREAD* = 0x00000004'i32
+  WT_EXECUTEONLYONCE* = 0x00000008'i32
+  WT_EXECUTELONGFUNCTION* = 0x00000010'i32
+  WT_EXECUTEINTIMERTHREAD* = 0x00000020'i32
+  WT_EXECUTEINPERSISTENTIOTHREAD* = 0x00000040'i32
+  WT_EXECUTEINPERSISTENTTHREAD* = 0x00000080'i32
+  WT_TRANSFER_IMPERSONATION* = 0x00000100'i32
+  PROCESS_TERMINATE* = 0x00000001'i32
+  PROCESS_CREATE_THREAD* = 0x00000002'i32
+  PROCESS_SET_SESSIONID* = 0x00000004'i32
+  PROCESS_VM_OPERATION* = 0x00000008'i32
+  PROCESS_VM_READ* = 0x00000010'i32
+  PROCESS_VM_WRITE* = 0x00000020'i32
+  PROCESS_DUP_HANDLE* = 0x00000040'i32
+  PROCESS_CREATE_PROCESS* = 0x00000080'i32
+  PROCESS_SET_QUOTA* = 0x00000100'i32
+  PROCESS_SET_INFORMATION* = 0x00000200'i32
+  PROCESS_QUERY_INFORMATION* = 0x00000400'i32
+  PROCESS_SUSPEND_RESUME* = 0x00000800'i32
+  PROCESS_QUERY_LIMITED_INFORMATION* = 0x00001000'i32
+  PROCESS_SET_LIMITED_INFORMATION* = 0x00002000'i32
+type
+  WAITORTIMERCALLBACK* = proc(para1: pointer, para2: int32): void {.stdcall.}
+
+proc postQueuedCompletionStatus*(CompletionPort: HANDLE,
+                                dwNumberOfBytesTransferred: DWORD,
+                                dwCompletionKey: ULONG_PTR,
+                                lpOverlapped: pointer): bool
+     {.stdcall, dynlib: "kernel32", importc: "PostQueuedCompletionStatus".}
+
+proc registerWaitForSingleObject*(phNewWaitObject: ptr Handle, hObject: Handle,
+                                 Callback: WAITORTIMERCALLBACK,
+                                 Context: pointer,
+                                 dwMilliseconds: ULONG,
+                                 dwFlags: ULONG): bool
+     {.stdcall, dynlib: "kernel32", importc: "RegisterWaitForSingleObject".}
+
+proc unregisterWait*(WaitHandle: HANDLE): DWORD
+     {.stdcall, dynlib: "kernel32", importc: "UnregisterWait".}
+
+proc openProcess*(dwDesiredAccess: DWORD, bInheritHandle: WINBOOL,
+                    dwProcessId: DWORD): Handle
+     {.stdcall, dynlib: "kernel32", importc: "OpenProcess".}
+
+when defined(useWinAnsi):
+  proc createEvent*(lpEventAttributes: ptr SECURITY_ATTRIBUTES,
+                    bManualReset: DWORD, bInitialState: DWORD,
+                    lpName: cstring): Handle
+       {.stdcall, dynlib: "kernel32", importc: "CreateEventA".}
+else:
+  proc createEvent*(lpEventAttributes: ptr SECURITY_ATTRIBUTES,
+                    bManualReset: DWORD, bInitialState: DWORD,
+                    lpName: ptr Utf16Char): Handle
+       {.stdcall, dynlib: "kernel32", importc: "CreateEventW".}
+
+proc setEvent*(hEvent: Handle): cint
+     {.stdcall, dynlib: "kernel32", importc: "SetEvent".}
+
+const
+  FD_READ* = 0x00000001'i32
+  FD_WRITE* = 0x00000002'i32
+  FD_OOB* = 0x00000004'i32
+  FD_ACCEPT* = 0x00000008'i32
+  FD_CONNECT* = 0x00000010'i32
+  FD_CLOSE* = 0x00000020'i32
+  FD_QQS* = 0x00000040'i32
+  FD_GROUP_QQS* = 0x00000080'i32
+  FD_ROUTING_INTERFACE_CHANGE* = 0x00000100'i32
+  FD_ADDRESS_LIST_CHANGE* = 0x00000200'i32
+  FD_ALL_EVENTS* = 0x000003FF'i32
+
+proc wsaEventSelect*(s: SocketHandle, hEventObject: Handle,
+                     lNetworkEvents: clong): cint
+    {.stdcall, importc: "WSAEventSelect", dynlib: "ws2_32.dll".}
+
+proc wsaCreateEvent*(): Handle
+    {.stdcall, importc: "WSACreateEvent", dynlib: "ws2_32.dll".}
+
+proc wsaCloseEvent*(hEvent: Handle): bool
+     {.stdcall, importc: "WSACloseEvent", dynlib: "ws2_32.dll".}
+
+proc wsaResetEvent*(hEvent: Handle): bool
+     {.stdcall, importc: "WSAResetEvent", dynlib: "ws2_32.dll".}
+
+type
+  KEY_EVENT_RECORD* {.final, pure.} = object
+    eventType*: int16
+    bKeyDown*: WINBOOL
+    wRepeatCount*: int16
+    wVirtualKeyCode*: int16
+    wVirtualScanCode*: int16
+    uChar*: int16
+    dwControlKeyState*: DWORD
+
+when defined(useWinAnsi):
+  proc readConsoleInput*(hConsoleInput: Handle, lpBuffer: pointer, nLength: cint,
+                        lpNumberOfEventsRead: ptr cint): cint
+       {.stdcall, dynlib: "kernel32", importc: "ReadConsoleInputA".}
+else:
+  proc readConsoleInput*(hConsoleInput: Handle, lpBuffer: pointer, nLength: cint,
+                        lpNumberOfEventsRead: ptr cint): cint
+       {.stdcall, dynlib: "kernel32", importc: "ReadConsoleInputW".}

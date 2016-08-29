@@ -30,22 +30,9 @@ proc intLiteral(i: BiggestInt): Rope =
   else:
     result = ~"(IL64(-9223372036854775807) - IL64(1))"
 
-proc int32Literal(i: int): Rope =
-  if i == int(low(int32)):
-    result = ~"(-2147483647 -1)"
-  else:
-    result = rope(i)
-
-proc genHexLiteral(v: PNode): Rope =
-  # hex literals are unsigned in C
-  # so we don't generate hex literals any longer.
-  if v.kind notin {nkIntLit..nkUInt64Lit}:
-    internalError(v.info, "genHexLiteral")
-  result = intLiteral(v.intVal)
-
 proc getStrLit(m: BModule, s: string): Rope =
   discard cgsym(m, "TGenericSeq")
-  result = "TMP" & rope(backendId())
+  result = getTempName(m)
   addf(m.s[cfsData], "STRING_LITERAL($1, $2, $3);$n",
        [result, makeCString(s), rope(len(s))])
 
@@ -67,11 +54,11 @@ proc genLiteral(p: BProc, n: PNode, ty: PType): Rope =
   of nkNilLit:
     let t = skipTypes(ty, abstractVarRange)
     if t.kind == tyProc and t.callConv == ccClosure:
-      var id = nodeTableTestOrSet(p.module.dataCache, n, gBackendId)
-      result = "TMP" & rope(id)
-      if id == gBackendId:
+      let id = nodeTableTestOrSet(p.module.dataCache, n, p.module.labels)
+      result = p.module.tmpBase & rope(id)
+      if id == p.module.labels:
         # not found in cache:
-        inc(gBackendId)
+        inc(p.module.labels)
         addf(p.module.s[cfsData],
              "static NIM_CONST $1 $2 = {NIM_NIL,NIM_NIL};$n",
              [getTypeDesc(p.module, t), result])
@@ -81,13 +68,14 @@ proc genLiteral(p: BProc, n: PNode, ty: PType): Rope =
     if n.strVal.isNil:
       result = ropecg(p.module, "((#NimStringDesc*) NIM_NIL)", [])
     elif skipTypes(ty, abstractVarRange).kind == tyString:
-      var id = nodeTableTestOrSet(p.module.dataCache, n, gBackendId)
-      if id == gBackendId:
+      let id = nodeTableTestOrSet(p.module.dataCache, n, p.module.labels)
+      if id == p.module.labels:
         # string literal not found in the cache:
         result = ropecg(p.module, "((#NimStringDesc*) &$1)",
                         [getStrLit(p.module, n.strVal)])
       else:
-        result = ropecg(p.module, "((#NimStringDesc*) &TMP$1)", [rope(id)])
+        result = ropecg(p.module, "((#NimStringDesc*) &$1$2)",
+                        [p.module.tmpBase, rope(id)])
     else:
       result = makeCString(n.strVal)
   of nkFloatLit..nkFloat64Lit:
@@ -134,11 +122,11 @@ proc genSetNode(p: BProc, n: PNode): Rope =
   var size = int(getSize(n.typ))
   toBitSet(n, cs)
   if size > 8:
-    var id = nodeTableTestOrSet(p.module.dataCache, n, gBackendId)
-    result = "TMP" & rope(id)
-    if id == gBackendId:
+    let id = nodeTableTestOrSet(p.module.dataCache, n, p.module.labels)
+    result = p.module.tmpBase & rope(id)
+    if id == p.module.labels:
       # not found in cache:
-      inc(gBackendId)
+      inc(p.module.labels)
       addf(p.module.s[cfsData], "static NIM_CONST $1 $2 = $3;$n",
            [getTypeDesc(p.module, n.typ), result, genRawSetData(cs, size)])
   else:
@@ -170,7 +158,6 @@ proc getStorageLoc(n: PNode): TStorageLoc =
 proc genRefAssign(p: BProc, dest, src: TLoc, flags: TAssignmentFlags) =
   if dest.s == OnStack or not usesNativeGC():
     linefmt(p, cpsStmts, "$1 = $2;$n", rdLoc(dest), rdLoc(src))
-    if needToKeepAlive in flags: keepAlive(p, dest)
   elif dest.s == OnHeap:
     # location is on heap
     # now the writer barrier is inlined for performance:
@@ -197,7 +184,6 @@ proc genRefAssign(p: BProc, dest, src: TLoc, flags: TAssignmentFlags) =
   else:
     linefmt(p, cpsStmts, "#unsureAsgnRef((void**) $1, $2);$n",
             addrLoc(dest), rdLoc(src))
-    if needToKeepAlive in flags: keepAlive(p, dest)
 
 proc asgnComplexity(n: PNode): int =
   if n != nil:
@@ -217,7 +203,6 @@ proc optAsgnLoc(a: TLoc, t: PType, field: Rope): TLoc =
   result.s = a.s
   result.t = t
   result.r = rdLoc(a) & "." & field
-  result.heapRoot = a.heapRoot
 
 proc genOptAsgnTuple(p: BProc, dest, src: TLoc, flags: TAssignmentFlags) =
   let newflags =
@@ -267,7 +252,6 @@ proc genGenericAsgn(p: BProc, dest, src: TLoc, flags: TAssignmentFlags) =
       linefmt(p, cpsStmts,
            "memcpy((void*)$1, (NIM_CONST void*)$2, sizeof($3));$n",
            addrLoc(dest), addrLoc(src), rdLoc(dest))
-      if needToKeepAlive in flags: keepAlive(p, dest)
     else:
       linefmt(p, cpsStmts, "#genericShallowAssign((void*)$1, (void*)$2, $3);$n",
               addrLoc(dest), addrLoc(src), genTypeInfo(p.module, dest.t))
@@ -298,7 +282,6 @@ proc genAssignment(p: BProc, dest, src: TLoc, flags: TAssignmentFlags) =
     else:
       if dest.s == OnStack or not usesNativeGC():
         linefmt(p, cpsStmts, "$1 = #copyString($2);$n", dest.rdLoc, src.rdLoc)
-        if needToKeepAlive in flags: keepAlive(p, dest)
       elif dest.s == OnHeap:
         # we use a temporary to care for the dreaded self assignment:
         var tmp: TLoc
@@ -309,7 +292,6 @@ proc genAssignment(p: BProc, dest, src: TLoc, flags: TAssignmentFlags) =
       else:
         linefmt(p, cpsStmts, "#unsureAsgnRef((void**) $1, #copyString($2));$n",
                addrLoc(dest), rdLoc(src))
-        if needToKeepAlive in flags: keepAlive(p, dest)
   of tyProc:
     if needsComplexAssignment(dest.t):
       # optimize closure assignment:
@@ -399,9 +381,6 @@ proc genDeepCopy(p: BProc; dest, src: TLoc) =
     linefmt(p, cpsStmts, "$1 = $2;$n", rdLoc(dest), rdLoc(src))
   else: internalError("genDeepCopy: " & $ty.kind)
 
-proc getDestLoc(p: BProc, d: var TLoc, typ: PType) =
-  if d.k == locNone: getTemp(p, typ, d)
-
 proc putLocIntoDest(p: BProc, d: var TLoc, s: TLoc) =
   if d.k != locNone:
     if lfNoDeepCopy in d.flags: genAssignment(p, d, s, {})
@@ -452,13 +431,6 @@ proc unaryStmt(p: BProc, e: PNode, d: var TLoc, frmt: string) =
   initLocExpr(p, e.sons[1], a)
   lineCg(p, cpsStmts, frmt, [rdLoc(a)])
 
-proc binaryStmtChar(p: BProc, e: PNode, d: var TLoc, frmt: string) =
-  var a, b: TLoc
-  if (d.k != locNone): internalError(e.info, "binaryStmtChar")
-  initLocExpr(p, e.sons[1], a)
-  initLocExpr(p, e.sons[2], b)
-  lineCg(p, cpsStmts, frmt, [rdCharLoc(a), rdCharLoc(b)])
-
 proc binaryExpr(p: BProc, e: PNode, d: var TLoc, frmt: string) =
   var a, b: TLoc
   assert(e.sons[1].typ != nil)
@@ -490,7 +462,7 @@ proc binaryArithOverflowRaw(p: BProc, t: PType, a, b: TLoc;
   var size = getSize(t)
   let storage = if size < platform.intSize: rope("NI")
                 else: getTypeDesc(p.module, t)
-  result = getTempName()
+  result = getTempName(p.module)
   linefmt(p, cpsLocals, "$1 $2;$n", storage, result)
   lineCg(p, cpsStmts, frmt, result, rdCharLoc(a), rdCharLoc(b))
   if size < platform.intSize or t.kind in {tyRange, tyEnum}:
@@ -591,7 +563,6 @@ proc binaryArith(p: BProc, e: PNode, d: var TLoc, op: TMagic) =
       "($1 == $2)",           # EqPtr
       "($1 <= $2)",           # LePtr
       "($1 < $2)",            # LtPtr
-      "($1 == $2)",           # EqCString
       "($1 != $2)"]           # Xor
   var
     a, b: TLoc
@@ -612,7 +583,7 @@ proc genEqProc(p: BProc, e: PNode, d: var TLoc) =
   assert(e.sons[2].typ != nil)
   initLocExpr(p, e.sons[1], a)
   initLocExpr(p, e.sons[2], b)
-  if a.t.callConv == ccClosure:
+  if a.t.skipTypes(abstractInst).callConv == ccClosure:
     putIntoDest(p, d, e.typ,
       "($1.ClPrc == $2.ClPrc && $1.ClEnv == $2.ClEnv)" % [rdLoc(a), rdLoc(b)])
   else:
@@ -670,11 +641,17 @@ proc genDeref(p: BProc, e: PNode, d: var TLoc; enforceDeref=false) =
     #if e[0].kind != nkBracketExpr:
     #  message(e.info, warnUser, "CAME HERE " & renderTree(e))
     expr(p, e.sons[0], d)
+    if e.sons[0].typ.skipTypes(abstractInst).kind == tyRef:
+      d.s = OnHeap
   else:
     var a: TLoc
-    initLocExprSingleUse(p, e.sons[0], a)
+    let typ = skipTypes(e.sons[0].typ, abstractInst)
+    if typ.kind == tyVar and tfVarIsPtr notin typ.flags and p.module.compileToCpp and e.sons[0].kind == nkHiddenAddr:
+      initLocExprSingleUse(p, e[0][0], d)
+      return
+    else:
+      initLocExprSingleUse(p, e.sons[0], a)
     if d.k == locNone:
-      let typ = skipTypes(a.t, abstractInst)
       # dest = *a;  <-- We do not know that 'dest' is on the heap!
       # It is completely wrong to set 'd.s' here, unless it's not yet
       # been assigned to.
@@ -689,9 +666,9 @@ proc genDeref(p: BProc, e: PNode, d: var TLoc; enforceDeref=false) =
           return
       of tyPtr:
         d.s = OnUnknown         # BUGFIX!
-      else: internalError(e.info, "genDeref " & $a.t.kind)
+      else:
+        internalError(e.info, "genDeref " & $typ.kind)
     elif p.module.compileToCpp:
-      let typ = skipTypes(a.t, abstractInst)
       if typ.kind == tyVar and tfVarIsPtr notin typ.flags and
            e.kind == nkHiddenDeref:
         putIntoDest(p, d, e.typ, rdLoc(a), a.s)
@@ -722,8 +699,6 @@ proc genAddr(p: BProc, e: PNode, d: var TLoc) =
 
 template inheritLocation(d: var TLoc, a: TLoc) =
   if d.k == locNone: d.s = a.s
-  if d.heapRoot == nil:
-    d.heapRoot = if a.heapRoot != nil: a.heapRoot else: a.r
 
 proc genRecordFieldAux(p: BProc, e: PNode, d, a: var TLoc): PType =
   initLocExpr(p, e.sons[0], a)
@@ -798,9 +773,9 @@ proc genFieldCheck(p: BProc, e: PNode, obj: Rope, field: PSym;
     v.r.add(d.loc.r)
     genInExprAux(p, it, u, v, test)
     let id = nodeTableTestOrSet(p.module.dataCache,
-                               newStrNode(nkStrLit, field.name.s), gBackendId)
-    let strLit = if id == gBackendId: getStrLit(p.module, field.name.s)
-                 else: "TMP" & rope(id)
+                               newStrNode(nkStrLit, field.name.s), p.module.labels)
+    let strLit = if id == p.module.labels: getStrLit(p.module, field.name.s)
+                 else: p.module.tmpBase & rope(id)
     if op.magic == mNot:
       linefmt(p, cpsStmts,
               "if ($1) #raiseFieldError(((#NimStringDesc*) &$2));$n",
@@ -887,7 +862,6 @@ proc genSeqElem(p: BProc, x, y: PNode, d: var TLoc) =
            "if ((NU)($1) >= (NU)($2->$3)) #raiseIndexError();$n",
            rdLoc(b), rdLoc(a), lenField(p))
   if d.k == locNone: d.s = OnHeap
-  d.heapRoot = a.r
   if skipTypes(a.t, abstractVar).kind in {tyRef, tyPtr}:
     a.r = rfmt(nil, "(*$1)", a.r)
   putIntoDest(p, d, elemType(skipTypes(a.t, abstractVar)),
@@ -1002,9 +976,8 @@ proc genStrConcat(p: BProc, e: PNode, d: var TLoc) =
   add(p.s(cpsStmts), appends)
   if d.k == locNone:
     d = tmp
-    keepAlive(p, tmp)
   else:
-    genAssignment(p, d, tmp, {needToKeepAlive}) # no need for deep copying
+    genAssignment(p, d, tmp, {}) # no need for deep copying
   gcUsage(e)
 
 proc genStrAppend(p: BProc, e: PNode, d: var TLoc) =
@@ -1041,7 +1014,6 @@ proc genStrAppend(p: BProc, e: PNode, d: var TLoc) =
                         rdLoc(dest), rdLoc(a)))
   linefmt(p, cpsStmts, "$1 = #resizeString($1, $2$3);$n",
           rdLoc(dest), lens, rope(L))
-  keepAlive(p, dest)
   add(p.s(cpsStmts), appends)
   gcUsage(e)
 
@@ -1061,7 +1033,6 @@ proc genSeqElemAppend(p: BProc, e: PNode, d: var TLoc) =
       rdLoc(a),
       getTypeDesc(p.module, skipTypes(e.sons[1].typ, abstractVar)),
       getTypeDesc(p.module, bt)])
-  keepAlive(p, a)
   #if bt != b.t:
   #  echo "YES ", e.info, " new: ", typeToString(bt), " old: ", typeToString(b.t)
   initLoc(dest, locExpr, bt, OnHeap)
@@ -1088,7 +1059,7 @@ proc rawGenNew(p: BProc, a: TLoc, sizeExpr: Rope) =
               genTypeInfo(p.module, refType),
               sizeExpr]
   if a.s == OnHeap and usesNativeGC():
-    # use newObjRC1 as an optimization; and we don't need 'keepAlive' either
+    # use newObjRC1 as an optimization
     if canFormAcycle(a.t):
       linefmt(p, cpsStmts, "if ($1) #nimGCunref($1);$n", a.rdLoc)
     else:
@@ -1097,7 +1068,7 @@ proc rawGenNew(p: BProc, a: TLoc, sizeExpr: Rope) =
     linefmt(p, cpsStmts, "$1 = $2;$n", a.rdLoc, b.rdLoc)
   else:
     b.r = ropecg(p.module, "($1) #newObj($2, $3)", args)
-    genAssignment(p, a, b, {needToKeepAlive})  # set the object type:
+    genAssignment(p, a, b, {})  # set the object type:
   let bt = skipTypes(refType.sons[0], abstractRange)
   genObjectInit(p, cpsStmts, bt, a, false)
 
@@ -1128,7 +1099,7 @@ proc genNewSeqAux(p: BProc, dest: TLoc, length: Rope) =
     linefmt(p, cpsStmts, "$1 = $2;$n", dest.rdLoc, call.rdLoc)
   else:
     call.r = ropecg(p.module, "($1) #newSeq($2, $3)", args)
-    genAssignment(p, dest, call, {needToKeepAlive})
+    genAssignment(p, dest, call, {})
 
 proc genNewSeq(p: BProc, e: PNode) =
   var a, b: TLoc
@@ -1137,7 +1108,35 @@ proc genNewSeq(p: BProc, e: PNode) =
   genNewSeqAux(p, a, b.rdLoc)
   gcUsage(e)
 
+proc genNewSeqOfCap(p: BProc; e: PNode; d: var TLoc) =
+  let seqtype = skipTypes(e.typ, abstractVarRange)
+  var a: TLoc
+  initLocExpr(p, e.sons[1], a)
+  putIntoDest(p, d, e.typ, ropecg(p.module,
+              "($1)#nimNewSeqOfCap($2, $3)", [
+              getTypeDesc(p.module, seqtype),
+              genTypeInfo(p.module, seqtype), a.rdLoc]))
+  gcUsage(e)
+
+proc genConstExpr(p: BProc, n: PNode): Rope
+proc handleConstExpr(p: BProc, n: PNode, d: var TLoc): bool =
+  if d.k == locNone and n.len > ord(n.kind == nkObjConstr) and n.isDeepConstExpr:
+    var t = getUniqueType(n.typ)
+    discard getTypeDesc(p.module, t) # so that any fields are initialized
+    let id = nodeTableTestOrSet(p.module.dataCache, n, p.module.labels)
+    fillLoc(d, locData, t, p.module.tmpBase & rope(id), OnStatic)
+    if id == p.module.labels:
+      # expression not found in the cache:
+      inc(p.module.labels)
+      addf(p.module.s[cfsData], "NIM_CONST $1 $2 = $3;$n",
+           [getTypeDesc(p.module, t), d.r, genConstExpr(p, n)])
+    result = true
+  else:
+    result = false
+
 proc genObjConstr(p: BProc, e: PNode, d: var TLoc) =
+  if handleConstExpr(p, e, d): return
+  #echo rendertree e, " ", e.isDeepConstExpr
   var tmp: TLoc
   var t = e.typ.skipTypes(abstractInst)
   getTemp(p, t, tmp)
@@ -1165,7 +1164,6 @@ proc genObjConstr(p: BProc, e: PNode, d: var TLoc) =
     tmp2.k = locTemp
     tmp2.t = field.loc.t
     tmp2.s = if isRef: OnHeap else: OnStack
-    tmp2.heapRoot = tmp.r
     expr(p, it.sons[1], tmp2)
 
   if d.k == locNone:
@@ -1212,7 +1210,6 @@ proc genNewFinalize(p: BProc, e: PNode) =
     a, b, f: TLoc
     refType, bt: PType
     ti: Rope
-    oldModule: BModule
   refType = skipTypes(e.sons[1].typ, abstractVarRange)
   initLocExpr(p, e.sons[1], a)
   initLocExpr(p, e.sons[2], f)
@@ -1222,7 +1219,7 @@ proc genNewFinalize(p: BProc, e: PNode) =
   b.r = ropecg(p.module, "($1) #newObj($2, sizeof($3))", [
       getTypeDesc(p.module, refType),
       ti, getTypeDesc(p.module, skipTypes(refType.lastSon, abstractRange))])
-  genAssignment(p, a, b, {needToKeepAlive})  # set the object type:
+  genAssignment(p, a, b, {})  # set the object type:
   bt = skipTypes(refType.lastSon, abstractRange)
   genObjectInit(p, cpsStmts, bt, a, false)
   gcUsage(e)
@@ -1231,7 +1228,7 @@ proc genOfHelper(p: BProc; dest: PType; a: Rope): Rope =
   # unfortunately 'genTypeInfo' sets tfObjHasKids as a side effect, so we
   # have to call it here first:
   let ti = genTypeInfo(p.module, dest)
-  if tfFinal in dest.flags or (p.module.objHasKidsValid and
+  if tfFinal in dest.flags or (objHasKidsValid in p.module.flags and
                                tfObjHasKids notin dest.flags):
     result = "$1.m_type == $2" % [a, ti]
   else:
@@ -1289,7 +1286,7 @@ proc genRepr(p: BProc, e: PNode, d: var TLoc) =
     putIntoDest(p, d, e.typ, ropecg(p.module, "#reprChar($1)", [rdLoc(a)]), a.s)
   of tyEnum, tyOrdinal:
     putIntoDest(p, d, e.typ,
-                ropecg(p.module, "#reprEnum($1, $2)", [
+                ropecg(p.module, "#reprEnum((NI)$1, $2)", [
                 rdLoc(a), genTypeInfo(p.module, t)]), a.s)
   of tyString:
     putIntoDest(p, d, e.typ, ropecg(p.module, "#reprStr($1)", [rdLoc(a)]), a.s)
@@ -1316,7 +1313,7 @@ proc genRepr(p: BProc, e: PNode, d: var TLoc) =
     putIntoDest(p, d, e.typ,
                 ropecg(p.module, "#reprAny($1, $2)", [
                 rdLoc(a), genTypeInfo(p.module, t)]), a.s)
-  of tyEmpty:
+  of tyEmpty, tyVoid:
     localError(e.info, "'repr' doesn't support 'void' type")
   else:
     putIntoDest(p, d, e.typ, ropecg(p.module, "#reprAny($1, $2)",
@@ -1332,7 +1329,7 @@ proc genDollar(p: BProc, n: PNode, d: var TLoc, frmt: string) =
   initLocExpr(p, n.sons[1], a)
   a.r = ropecg(p.module, frmt, [rdLoc(a)])
   if d.k == locNone: getTemp(p, n.typ, d)
-  genAssignment(p, d, a, {needToKeepAlive})
+  genAssignment(p, d, a, {})
   gcUsage(n)
 
 proc genArrayLen(p: BProc, e: PNode, d: var TLoc, op: TMagic) =
@@ -1374,12 +1371,10 @@ proc genSetLengthSeq(p: BProc, e: PNode, d: var TLoc) =
   lineCg(p, cpsStmts, setLenPattern, [
       rdLoc(a), rdLoc(b), getTypeDesc(p.module, t),
       getTypeDesc(p.module, t.sons[0])])
-  keepAlive(p, a)
   gcUsage(e)
 
 proc genSetLengthStr(p: BProc, e: PNode, d: var TLoc) =
   binaryStmt(p, e, d, "$1 = #setLengthStr($1, $2);$n")
-  keepAlive(p, d)
   gcUsage(e)
 
 proc genSwap(p: BProc, e: PNode, d: var TLoc) =
@@ -1554,11 +1549,12 @@ proc genSomeCast(p: BProc, e: PNode, d: var TLoc) =
         [getTypeDesc(p.module, e.typ), rdCharLoc(a)], a.s)
 
 proc genCast(p: BProc, e: PNode, d: var TLoc) =
-  const floatTypes = {tyFloat..tyFloat128}
+  const ValueTypes = {tyFloat..tyFloat128, tyTuple, tyObject,
+                      tyArray, tyArrayConstr}
   let
     destt = skipTypes(e.typ, abstractRange)
     srct = skipTypes(e.sons[1].typ, abstractRange)
-  if destt.kind in floatTypes or srct.kind in floatTypes:
+  if destt.kind in ValueTypes or srct.kind in ValueTypes:
     # 'cast' and some float type involved? --> use a union.
     inc(p.labels)
     var lbl = p.labels.rope
@@ -1648,7 +1644,6 @@ proc binaryFloatArith(p: BProc, e: PNode, d: var TLoc, m: TMagic) =
     binaryArith(p, e, d, m)
 
 proc genMagicExpr(p: BProc, e: PNode, d: var TLoc, op: TMagic) =
-  var line, filen: Rope
   case op
   of mOr, mAnd: genAndOr(p, e, d, op)
   of mNot..mToBiggestInt: unaryArith(p, e, d, op)
@@ -1664,10 +1659,10 @@ proc genMagicExpr(p: BProc, e: PNode, d: var TLoc, op: TMagic) =
     if optOverflowCheck notin p.options: unaryExpr(p, e, d, "($1 - 1)")
     else: unaryExpr(p, e, d, "#subInt($1, 1)")
   of mInc, mDec:
-    const opr: array [mInc..mDec, string] = ["$1 += $2;$n", "$1 -= $2;$n"]
-    const fun64: array [mInc..mDec, string] = ["$# = #addInt64($#, $#);$n",
+    const opr: array[mInc..mDec, string] = ["$1 += $2;$n", "$1 -= $2;$n"]
+    const fun64: array[mInc..mDec, string] = ["$# = #addInt64($#, $#);$n",
                                                "$# = #subInt64($#, $#);$n"]
-    const fun: array [mInc..mDec, string] = ["$# = #addInt($#, $#);$n",
+    const fun: array[mInc..mDec, string] = ["$# = #addInt($#, $#);$n",
                                              "$# = #subInt($#, $#);$n"]
     let underlying = skipTypes(e.sons[1].typ, {tyGenericInst, tyVar, tyRange})
     if optOverflowCheck notin p.options or underlying.kind in {tyUInt..tyUInt64}:
@@ -1686,10 +1681,7 @@ proc genMagicExpr(p: BProc, e: PNode, d: var TLoc, op: TMagic) =
         getTypeDesc(p.module, ranged), res])
 
   of mConStrStr: genStrConcat(p, e, d)
-  of mAppendStrCh:
-    binaryStmt(p, e, d, "$1 = #addChar($1, $2);$n")
-    # strictly speaking we need to generate "keepAlive" here too, but this
-    # very likely not needed and would slow down the code too much I fear
+  of mAppendStrCh: binaryStmt(p, e, d, "$1 = #addChar($1, $2);$n")
   of mAppendStrStr: genStrAppend(p, e, d)
   of mAppendSeqElem: genSeqElemAppend(p, e, d)
   of mEqStr: genStrEquals(p, e, d)
@@ -1708,6 +1700,7 @@ proc genMagicExpr(p: BProc, e: PNode, d: var TLoc, op: TMagic) =
   of mNew: genNew(p, e)
   of mNewFinalize: genNewFinalize(p, e)
   of mNewSeq: genNewSeq(p, e)
+  of mNewSeqOfCap: genNewSeqOfCap(p, e, d)
   of mSizeOf:
     let t = e.sons[1].typ.skipTypes({tyTypeDesc})
     putIntoDest(p, d, e.typ, "((NI)sizeof($1))" % [getTypeDesc(p.module, t)])
@@ -1750,24 +1743,8 @@ proc genMagicExpr(p: BProc, e: PNode, d: var TLoc, op: TMagic) =
     initLocExpr(p, x, a)
     initLocExpr(p, e.sons[2], b)
     genDeepCopy(p, a, b)
-  of mDotDot: genCall(p, e, d)
+  of mDotDot, mEqCString: genCall(p, e, d)
   else: internalError(e.info, "genMagicExpr: " & $op)
-
-proc genConstExpr(p: BProc, n: PNode): Rope
-proc handleConstExpr(p: BProc, n: PNode, d: var TLoc): bool =
-  if nfAllConst in n.flags and d.k == locNone and n.len > 0 and n.isDeepConstExpr:
-    var t = getUniqueType(n.typ)
-    discard getTypeDesc(p.module, t) # so that any fields are initialized
-    var id = nodeTableTestOrSet(p.module.dataCache, n, gBackendId)
-    fillLoc(d, locData, t, "TMP" & rope(id), OnStatic)
-    if id == gBackendId:
-      # expression not found in the cache:
-      inc(gBackendId)
-      addf(p.module.s[cfsData], "NIM_CONST $1 $2 = $3;$n",
-           [getTypeDesc(p.module, t), d.r, genConstExpr(p, n)])
-    result = true
-  else:
-    result = false
 
 proc genSetConstr(p: BProc, e: PNode, d: var TLoc) =
   # example: { a..b, c, d, e, f..g }
@@ -1852,10 +1829,16 @@ proc genClosure(p: BProc, n: PNode, d: var TLoc) =
     initLocExpr(p, n.sons[1], b)
     if n.sons[0].skipConv.kind == nkClosure:
       internalError(n.info, "closure to closure created")
-    getTemp(p, n.typ, tmp)
-    linefmt(p, cpsStmts, "$1.ClPrc = $2; $1.ClEnv = $3;$n",
-            tmp.rdLoc, a.rdLoc, b.rdLoc)
-    putLocIntoDest(p, d, tmp)
+    # tasyncawait.nim breaks with this optimization:
+    when false:
+      if d.k != locNone:
+        linefmt(p, cpsStmts, "$1.ClPrc = $2; $1.ClEnv = $3;$n",
+                d.rdLoc, a.rdLoc, b.rdLoc)
+    else:
+      getTemp(p, n.typ, tmp)
+      linefmt(p, cpsStmts, "$1.ClPrc = $2; $1.ClEnv = $3;$n",
+              tmp.rdLoc, a.rdLoc, b.rdLoc)
+      putLocIntoDest(p, d, tmp)
 
 proc genArrayConstr(p: BProc, n: PNode, d: var TLoc) =
   var arr: TLoc
@@ -1943,12 +1926,12 @@ proc downConv(p: BProc, n: PNode, d: var TLoc) =
 proc exprComplexConst(p: BProc, n: PNode, d: var TLoc) =
   var t = getUniqueType(n.typ)
   discard getTypeDesc(p.module, t) # so that any fields are initialized
-  var id = nodeTableTestOrSet(p.module.dataCache, n, gBackendId)
-  var tmp = "TMP" & rope(id)
+  let id = nodeTableTestOrSet(p.module.dataCache, n, p.module.labels)
+  let tmp = p.module.tmpBase & rope(id)
 
-  if id == gBackendId:
+  if id == p.module.labels:
     # expression not found in the cache:
-    inc(gBackendId)
+    inc(p.module.labels)
     addf(p.module.s[cfsData], "NIM_CONST $1 $2 = $3;$n",
          [getTypeDesc(p.module, t), tmp, genConstExpr(p, n)])
 
@@ -1956,6 +1939,10 @@ proc exprComplexConst(p: BProc, n: PNode, d: var TLoc) =
     fillLoc(d, locData, t, tmp, OnStatic)
   else:
     putDataIntoDest(p, d, t, tmp)
+    # This fixes bug #4551, but we really need better dataflow
+    # analysis to make this 100% safe.
+    if t.kind notin {tySequence, tyString}:
+      d.s = OnStatic
 
 proc expr(p: BProc, n: PNode, d: var TLoc) =
   case n.kind
@@ -1981,10 +1968,7 @@ proc expr(p: BProc, n: PNode, d: var TLoc) =
         internalError(n.info, "expr: proc not init " & sym.name.s)
       putLocIntoDest(p, d, sym.loc)
     of skConst:
-      if sfFakeConst in sym.flags:
-        if sfGlobal in sym.flags: genVarPrototype(p.module, sym)
-        putLocIntoDest(p, d, sym.loc)
-      elif isSimpleConst(sym.typ):
+      if isSimpleConst(sym.typ):
         putIntoDest(p, d, n.typ, genLiteral(p, sym.ast, sym.typ), OnStatic)
       else:
         genComplexConst(p, sym, d)
@@ -2156,7 +2140,8 @@ proc genConstSimpleList(p: BProc, n: PNode): Rope =
   result = rope("{")
   for i in countup(ord(n.kind == nkObjConstr), length - 2):
     addf(result, "$1,$n", [genNamedConstExpr(p, n.sons[i])])
-  if length > 0: add(result, genNamedConstExpr(p, n.sons[length - 1]))
+  if length > ord(n.kind == nkObjConstr):
+    add(result, genNamedConstExpr(p, n.sons[length - 1]))
   addf(result, "}$n", [])
 
 proc genConstSeq(p: BProc, n: PNode, t: PType): Rope =
@@ -2170,8 +2155,7 @@ proc genConstSeq(p: BProc, n: PNode, t: PType): Rope =
     data.add("}")
   data.add("}")
 
-  inc(gBackendId)
-  result = "CNSTSEQ" & gBackendId.rope
+  result = getTempName(p.module)
 
   appcg(p.module, cfsData,
         "NIM_CONST struct {$n" &

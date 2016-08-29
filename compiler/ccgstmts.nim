@@ -16,12 +16,12 @@ const
     # above X strings a hash-switch for strings is generated
 
 proc registerGcRoot(p: BProc, v: PSym) =
-  if gSelectedGC in {gcMarkAndSweep, gcGenerational, gcV2} and
+  if gSelectedGC in {gcMarkAndSweep, gcGenerational, gcV2, gcRefc} and
       containsGarbageCollectedRef(v.loc.t):
     # we register a specialized marked proc here; this has the advantage
     # that it works out of the box for thread local storage then :-)
     let prc = genTraverseProcForGlobal(p.module, v)
-    appcg(p.module, p.module.initProc.procSec(cpsStmts),
+    appcg(p.module, p.module.initProc.procSec(cpsInit),
       "#nimRegisterGlobalMarker($1);$n", [prc])
 
 proc isAssignedImmediately(n: PNode): bool {.inline.} =
@@ -136,7 +136,7 @@ proc exprBlock(p: BProc, n: PNode, d: var TLoc) =
   expr(p, n, d)
   endBlock(p)
 
-template preserveBreakIdx(body: stmt): stmt {.immediate.} =
+template preserveBreakIdx(body: untyped): untyped =
   var oldBreakIdx = p.breakIdx
   body
   p.breakIdx = oldBreakIdx
@@ -269,8 +269,6 @@ proc genConstStmt(p: BProc, t: PNode) =
     if it.kind != nkConstDef: internalError(t.info, "genConstStmt")
     var c = it.sons[0].sym
     if c.typ.containsCompileTimeOnly: continue
-    if sfFakeConst in c.flags:
-      genSingleVar(p, it)
     elif c.typ.kind in ConstantDataTypes and lfNoDecl notin c.loc.flags and
         c.ast.len != 0:
       if not emitLazily(c): requestConstImpl(p, c)
@@ -461,7 +459,6 @@ proc genWhileStmt(p: BProc, t: PNode) =
   # significantly worse code
   var
     a: TLoc
-    labl: TLabel
   assert(sonsLen(t) == 2)
   inc(p.withinLoop)
   genLineDir(p, t)
@@ -570,7 +567,7 @@ proc genRaiseStmt(p: BProc, t: PNode) =
   else:
     genLineDir(p, t)
     # reraise the last exception:
-    if p.module.compileToCpp:
+    if p.module.compileToCpp and optNoCppExceptions notin gGlobalOptions:
       line(p, cpsStmts, ~"throw;$n")
     else:
       linefmt(p, cpsStmts, "#reraiseException();$n")
@@ -759,16 +756,6 @@ proc genCase(p: BProc, t: PNode, d: var TLoc) =
     else:
       genOrdinalCase(p, t, d)
 
-proc hasGeneralExceptSection(t: PNode): bool =
-  var length = sonsLen(t)
-  var i = 1
-  while (i < length) and (t.sons[i].kind == nkExceptBranch):
-    var blen = sonsLen(t.sons[i])
-    if blen == 1:
-      return true
-    inc(i)
-  result = false
-
 proc genTryCpp(p: BProc, t: PNode, d: var TLoc) =
   # code to generate:
   #
@@ -793,7 +780,7 @@ proc genTryCpp(p: BProc, t: PNode, d: var TLoc) =
   if not isEmptyType(t.typ) and d.k == locNone:
     getTemp(p, t.typ, d)
   genLineDir(p, t)
-  let exc = getTempName()
+  let exc = getTempName(p.module)
   if getCompilerProc("Exception") != nil:
     discard cgsym(p.module, "Exception")
   else:
@@ -886,7 +873,7 @@ proc genTry(p: BProc, t: PNode, d: var TLoc) =
     getTemp(p, t.typ, d)
   discard lists.includeStr(p.module.headerFiles, "<setjmp.h>")
   genLineDir(p, t)
-  var safePoint = getTempName()
+  var safePoint = getTempName(p.module)
   if getCompilerProc("Exception") != nil:
     discard cgsym(p.module, "Exception")
   else:
@@ -961,6 +948,8 @@ proc genAsmOrEmitStmt(p: BProc, t: PNode, isAsmStmt=false): Rope =
         var a: TLoc
         initLocExpr(p, t.sons[i], a)
         res.add($rdLoc(a))
+      elif sym.kind == skType:
+        res.add($getTypeDesc(p.module, sym.typ))
       else:
         var r = sym.loc.r
         if r == nil:
@@ -1089,7 +1078,6 @@ proc genDiscriminantCheck(p: BProc, a, tmp: TLoc, objtype: PType,
 proc asgnFieldDiscriminant(p: BProc, e: PNode) =
   var a, tmp: TLoc
   var dotExpr = e.sons[0]
-  var d: PSym
   if dotExpr.kind == nkCheckedFieldExpr: dotExpr = dotExpr.sons[0]
   initLocExpr(p, e.sons[0], a)
   getTemp(p, a.t, tmp)

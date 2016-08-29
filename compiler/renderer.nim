@@ -146,12 +146,6 @@ proc put(g: var TSrcGen, kind: TTokType, s: string) =
   else:
     g.pendingWhitespace = s.len
 
-proc putLong(g: var TSrcGen, kind: TTokType, s: string, lineLen: int) =
-  # use this for tokens over multiple lines.
-  addPendingNL(g)
-  addTok(g, kind, s)
-  g.lineLen = lineLen
-
 proc toNimChar(c: char): string =
   case c
   of '\0': result = "\\0"
@@ -263,9 +257,6 @@ proc pushCom(g: var TSrcGen, n: PNode) =
 
 proc popAllComs(g: var TSrcGen) =
   setLen(g.comStack, 0)
-
-proc popCom(g: var TSrcGen) =
-  setLen(g.comStack, len(g.comStack) - 1)
 
 const
   Space = " "
@@ -492,7 +483,7 @@ proc fits(g: TSrcGen, x: int): bool =
 
 type
   TSubFlag = enum
-    rfLongMode, rfNoIndent, rfInConstExpr
+    rfLongMode, rfInConstExpr
   TSubFlags = set[TSubFlag]
   TContext = tuple[spacing: int, flags: TSubFlags]
 
@@ -675,16 +666,6 @@ proc gfor(g: var TSrcGen, n: PNode) =
   gcoms(g)
   gstmts(g, n.sons[length - 1], c)
 
-proc gmacro(g: var TSrcGen, n: PNode) =
-  var c: TContext
-  initContext(c)
-  gsub(g, n.sons[0])
-  putWithSpace(g, tkColon, ":")
-  if longMode(n) or (lsub(n.sons[1]) + g.lineLen > MaxLineLen):
-    incl(c.flags, rfLongMode)
-  gcoms(g)
-  gsons(g, n, c, 1)
-
 proc gcase(g: var TSrcGen, n: PNode) =
   var c: TContext
   initContext(c)
@@ -704,7 +685,10 @@ proc gcase(g: var TSrcGen, n: PNode) =
 proc gproc(g: var TSrcGen, n: PNode) =
   var c: TContext
   if n.sons[namePos].kind == nkSym:
-    put(g, tkSymbol, renderDefinitionName(n.sons[namePos].sym))
+    let s = n.sons[namePos].sym
+    put(g, tkSymbol, renderDefinitionName(s))
+    if sfGenSym in s.flags:
+      put(g, tkIntLit, $s.id)
   else:
     gsub(g, n.sons[namePos])
 
@@ -712,7 +696,11 @@ proc gproc(g: var TSrcGen, n: PNode) =
     gpattern(g, n.sons[patternPos])
   let oldCheckAnon = g.checkAnon
   g.checkAnon = true
-  gsub(g, n.sons[genericParamsPos])
+  if renderNoBody in g.flags and n[miscPos].kind != nkEmpty and
+      n[miscPos][1].kind != nkEmpty:
+    gsub(g, n[miscPos][1])
+  else:
+    gsub(g, n.sons[genericParamsPos])
   g.checkAnon = oldCheckAnon
   gsub(g, n.sons[paramsPos])
   gsub(g, n.sons[pragmasPos])
@@ -794,7 +782,8 @@ proc gident(g: var TSrcGen, n: PNode) =
   else:
     t = tkOpr
   put(g, t, s)
-  if n.kind == nkSym and renderIds in g.flags: put(g, tkIntLit, $n.sym.id)
+  if n.kind == nkSym and (renderIds in g.flags or sfGenSym in n.sym.flags):
+    put(g, tkIntLit, $n.sym.id)
 
 proc doParamsAux(g: var TSrcGen, params: PNode) =
   if params.len > 1:
@@ -802,7 +791,7 @@ proc doParamsAux(g: var TSrcGen, params: PNode) =
     gsemicolon(g, params, 1)
     put(g, tkParRi, ")")
 
-  if params.sons[0].kind != nkEmpty:
+  if params.len > 0 and params.sons[0].kind != nkEmpty:
     putWithSpace(g, tkOpr, "->")
     gsub(g, params.sons[0])
 
@@ -811,6 +800,13 @@ proc gsub(g: var TSrcGen; n: PNode; i: int) =
     gsub(g, n[i])
   else:
     put(g, tkOpr, "<<" & $i & "th child missing for " & $n.kind & " >>")
+
+proc isBracket*(n: PNode): bool =
+  case n.kind
+  of nkClosedSymChoice, nkOpenSymChoice:
+    if n.len > 0: result = isBracket(n[0])
+  of nkSym: result = n.sym.name.s == "[]"
+  else: result = false
 
 proc gsub(g: var TSrcGen, n: PNode, c: TContext) =
   if isNil(n): return
@@ -841,10 +837,16 @@ proc gsub(g: var TSrcGen, n: PNode, c: TContext) =
   of nkCharLit: put(g, tkCharLit, atom(n))
   of nkNilLit: put(g, tkNil, atom(n))    # complex expressions
   of nkCall, nkConv, nkDotCall, nkPattern, nkObjConstr:
-    if sonsLen(n) >= 1: gsub(g, n.sons[0])
-    put(g, tkParLe, "(")
-    gcomma(g, n, 1)
-    put(g, tkParRi, ")")
+    if n.len > 0 and isBracket(n[0]):
+      gsub(g, n, 1)
+      put(g, tkBracketLe, "[")
+      gcomma(g, n, 2)
+      put(g, tkBracketRi, "]")
+    else:
+      if sonsLen(n) >= 1: gsub(g, n.sons[0])
+      put(g, tkParLe, "(")
+      gcomma(g, n, 1)
+      put(g, tkParRi, ")")
   of nkCallStrLit:
     gsub(g, n, 0)
     if n.len > 1 and n.sons[1].kind == nkRStrLit:
@@ -913,18 +915,21 @@ proc gsub(g: var TSrcGen, n: PNode, c: TContext) =
     gcomma(g, n, 1)
     put(g, tkParRi, ")")
   of nkClosedSymChoice, nkOpenSymChoice:
-    put(g, tkParLe, "(")
-    for i in countup(0, sonsLen(n) - 1):
-      if i > 0: put(g, tkOpr, "|")
-      if n.sons[i].kind == nkSym:
-        let s = n[i].sym
-        if s.owner != nil:
-          put g, tkSymbol, n[i].sym.owner.name.s
-          put g, tkOpr, "."
-        put g, tkSymbol, n[i].sym.name.s
-      else:
-        gsub(g, n.sons[i], c)
-    put(g, tkParRi, if n.kind == nkOpenSymChoice: "|...)" else: ")")
+    if renderIds in g.flags:
+      put(g, tkParLe, "(")
+      for i in countup(0, sonsLen(n) - 1):
+        if i > 0: put(g, tkOpr, "|")
+        if n.sons[i].kind == nkSym:
+          let s = n[i].sym
+          if s.owner != nil:
+            put g, tkSymbol, n[i].sym.owner.name.s
+            put g, tkOpr, "."
+          put g, tkSymbol, n[i].sym.name.s
+        else:
+          gsub(g, n.sons[i], c)
+      put(g, tkParRi, if n.kind == nkOpenSymChoice: "|...)" else: ")")
+    else:
+      gsub(g, n, 0)
   of nkPar, nkClosure:
     put(g, tkParLe, "(")
     gcomma(g, n, c)
