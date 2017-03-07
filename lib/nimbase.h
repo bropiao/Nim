@@ -39,6 +39,7 @@ __clang__
 #  pragma GCC diagnostic ignored "-Wswitch-bool"
 #  pragma GCC diagnostic ignored "-Wmacro-redefined"
 #  pragma GCC diagnostic ignored "-Wincompatible-pointer-types-discards-qualifiers"
+#  pragma GCC diagnostic ignored "-Wpointer-bool-conversion"
 #endif
 
 #if defined(_MSC_VER)
@@ -402,28 +403,31 @@ struct TFrame {
   NI16 calldepth;
 };
 
-#define nimfr(proc, file) \
-  TFrame FR; \
-  FR.procname = proc; FR.filename = file; FR.line = 0; FR.len = 0; nimFrame(&FR);
+#ifdef NIM_NEW_MANGLING_RULES
+  #define nimfr_(proc, file) \
+    TFrame FR_; \
+    FR_.procname = proc; FR_.filename = file; FR_.line = 0; FR_.len = 0; nimFrame(&FR_);
 
-#define nimfrs(proc, file, slots, length) \
-  struct {TFrame* prev;NCSTRING procname;NI line;NCSTRING filename; NI len; VarSlot s[slots];} FR; \
-  FR.procname = proc; FR.filename = file; FR.line = 0; FR.len = length; nimFrame((TFrame*)&FR);
+  #define nimfrs_(proc, file, slots, length) \
+    struct {TFrame* prev;NCSTRING procname;NI line;NCSTRING filename; NI len; VarSlot s[slots];} FR_; \
+    FR_.procname = proc; FR_.filename = file; FR_.line = 0; FR_.len = length; nimFrame((TFrame*)&FR_);
 
-#define nimln(n, file) \
-  FR.line = n; FR.filename = file;
+  #define nimln_(n, file) \
+    FR_.line = n; FR_.filename = file;
+#else
+  #define nimfr(proc, file) \
+    TFrame FR; \
+    FR.procname = proc; FR.filename = file; FR.line = 0; FR.len = 0; nimFrame(&FR);
+
+  #define nimfrs(proc, file, slots, length) \
+    struct {TFrame* prev;NCSTRING procname;NI line;NCSTRING filename; NI len; VarSlot s[slots];} FR; \
+    FR.procname = proc; FR.filename = file; FR.line = 0; FR.len = length; nimFrame((TFrame*)&FR);
+
+  #define nimln(n, file) \
+    FR.line = n; FR.filename = file;
+#endif
 
 #define NIM_POSIX_INIT  __attribute__((constructor))
-
-#if defined(_MSCVER) && defined(__i386__)
-__declspec(naked) int __fastcall NimXadd(volatile int* pNum, int val) {
-  __asm {
-    lock xadd dword ptr [ECX], EDX
-    mov EAX, EDX
-    ret
-  }
-}
-#endif
 
 #ifdef __GNUC__
 #  define likely(x) __builtin_expect(x, 1)
@@ -469,3 +473,7 @@ typedef int Nim_and_C_compiler_disagree_on_target_architecture[sizeof(NI) == siz
 #elif defined(__FreeBSD__)
 #  include <sys/types.h>
 #endif
+
+/* Compile with -d:checkAbi and a sufficiently C11:ish compiler to enable */
+#define NIM_CHECK_SIZE(typ, sz) \
+  _Static_assert(sizeof(typ) == sz, "Nim & C disagree on type size")

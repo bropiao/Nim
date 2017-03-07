@@ -20,8 +20,8 @@ const
   alwaysCycleGC = defined(smokeCycles)
   alwaysGC = defined(fulldebug) # collect after every memory
                                 # allocation (for debugging)
-  leakDetector = false
-  overwriteFree = false
+  leakDetector = defined(leakDetector)
+  overwriteFree = defined(nimBurnFree) # overwrite memory with 0xFF before free
   trackAllocationSource = leakDetector
 
   cycleGC = true # (de)activate the cycle GC

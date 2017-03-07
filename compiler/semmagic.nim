@@ -24,7 +24,7 @@ proc semTypeOf(c: PContext; n: PNode): PNode =
   result = newNodeI(nkTypeOfExpr, n.info)
   let typExpr = semExprWithType(c, n, {efInTypeof})
   result.add typExpr
-  result.typ = makeTypeDesc(c, typExpr.typ.skipTypes({tyTypeDesc, tyIter}))
+  result.typ = makeTypeDesc(c, typExpr.typ.skipTypes({tyTypeDesc}))
 
 type
   SemAsgnMode = enum asgnNormal, noOverloadedSubscript, noOverloadedAsgn
@@ -107,7 +107,7 @@ proc semTypeTraits(c: PContext, n: PNode): PNode =
   if t.sonsLen > 0:
     # This is either a type known to sem or a typedesc
     # param to a regular proc (again, known at instantiation)
-    result = evalTypeTrait(n[0], t, getCurrOwner())
+    result = evalTypeTrait(n[0], t, getCurrOwner(c))
   else:
     # a typedesc variable, pass unmodified to evals
     result = n
@@ -143,7 +143,7 @@ proc semBindSym(c: PContext, n: PNode): PNode =
     var sc = symChoice(c, id, s, TSymChoiceRule(isMixin.intVal))
     result.add(sc)
   else:
-    localError(n.sons[1].info, errUndeclaredIdentifier, sl.strVal)
+    errorUndeclaredIdentifier(c, n.sons[1].info, sl.strVal)
 
 proc semShallowCopy(c: PContext, n: PNode, flags: TExprFlags): PNode
 

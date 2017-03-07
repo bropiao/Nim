@@ -11,7 +11,8 @@
 # use the heap (and nor exceptions) do not include the GC or memory allocator.
 
 var
-  errorMessageWriter*: (proc(msg: string) {.tags: [WriteIOEffect], benign.})
+  errorMessageWriter*: (proc(msg: string) {.tags: [WriteIOEffect], benign,
+                                            nimcall.})
     ## Function that will be called
     ## instead of stdmsg.write when printing stacktrace.
     ## Unstable API.
@@ -26,7 +27,7 @@ else:
   proc writeToStdErr(msg: cstring) =
     discard MessageBoxA(0, msg, nil, 0)
 
-proc showErrorMessage(data: cstring) =
+proc showErrorMessage(data: cstring) {.gcsafe.} =
   if errorMessageWriter != nil:
     errorMessageWriter($data)
   else:
@@ -43,6 +44,17 @@ var
     # list of exception handlers
     # a global variable for the root of all try blocks
   currException {.threadvar.}: ref Exception
+
+type
+  FrameState = tuple[framePtr: PFrame, excHandler: PSafePoint, currException: ref Exception]
+
+proc getFrameState*(): FrameState {.compilerRtl, inl.} =
+  return (framePtr, excHandler, currException)
+
+proc setFrameState*(state: FrameState) {.compilerRtl, inl.} =
+  framePtr = state.framePtr
+  excHandler = state.excHandler
+  currException = state.currException
 
 proc getFrame*(): PFrame {.compilerRtl, inl.} = framePtr
 
@@ -211,6 +223,12 @@ proc quitOrDebug() {.inline.} =
   else:
     endbStep() # call the debugger
 
+when false:
+  proc rawRaise*(e: ref Exception) =
+    ## undocumented. Do not use.
+    pushCurrentException(e)
+    c_longjmp(excHandler.context, 1)
+
 proc raiseExceptionAux(e: ref Exception) =
   if localRaiseHook != nil:
     if not localRaiseHook(e): return
@@ -317,7 +335,7 @@ when defined(endb):
 
 when not defined(noSignalHandler):
   proc signalHandler(sign: cint) {.exportc: "signalHandler", noconv.} =
-    template processSignal(s, action: expr) {.immediate,  dirty.} =
+    template processSignal(s, action: untyped) {.dirty.} =
       if s == SIGINT: action("SIGINT: Interrupted by Ctrl-C.\n")
       elif s == SIGSEGV:
         action("SIGSEGV: Illegal storage access. (Attempt to read from nil?)\n")
@@ -338,6 +356,8 @@ when not defined(noSignalHandler):
           action("unknown signal\n")
 
     # print stack trace and quit
+    when defined(memtracker):
+      logPendingOps()
     when hasSomeStackTrace:
       GC_disable()
       var buf = newStringOfCap(2000)
@@ -368,5 +388,4 @@ when not defined(noSignalHandler):
 proc setControlCHook(hook: proc () {.noconv.} not nil) =
   # ugly cast, but should work on all architectures:
   type SignalHandler = proc (sign: cint) {.noconv, benign.}
-  {.deprecated: [TSignalHandler: SignalHandler].}
   c_signal(SIGINT, cast[SignalHandler](hook))

@@ -13,8 +13,10 @@
 
 import
   ast, strutils, strtabs, options, msgs, os, ropes, idents,
-  wordrecg, syntaxes, renderer, lexer, rstast, rst, rstgen, times, highlite,
-  importer, sempass2, json, xmltree, cgi, typesrenderer, astalgo
+  wordrecg, syntaxes, renderer, lexer, packages/docutils/rstast,
+  packages/docutils/rst, packages/docutils/rstgen, times,
+  packages/docutils/highlite, importer, sempass2, json, xmltree, cgi,
+  typesrenderer, astalgo
 
 type
   TSections = array[TSymKind, Rope]
@@ -27,6 +29,7 @@ type
     seenSymbols: StringTableRef # avoids duplicate symbol generation for HTML.
     jArray: JsonNode
     types: TStrTable
+    isPureRst: bool
 
   PDoc* = ref TDocumentor ## Alias to type less.
 
@@ -183,7 +186,7 @@ proc genRecComment(d: PDoc, n: PNode): Rope =
   if n == nil: return nil
   result = genComment(d, n).rope
   if result == nil:
-    if n.kind notin {nkEmpty..nkNilLit, nkEnumTy}:
+    if n.kind notin {nkEmpty..nkNilLit, nkEnumTy, nkTupleTy}:
       for i in countup(0, len(n)-1):
         result = genRecComment(d, n.sons[i])
         if result != nil: return
@@ -206,26 +209,26 @@ proc getPlainDocstring(n: PNode): string =
         result = getPlainDocstring(n.sons[i])
         if result.len > 0: return
 
+when false:
+  proc findDocComment(n: PNode): PNode =
+    if n == nil: return nil
+    if not isNil(n.comment) and startsWith(n.comment, "##"): return n
+    for i in countup(0, safeLen(n)-1):
+      result = findDocComment(n.sons[i])
+      if result != nil: return
 
-proc findDocComment(n: PNode): PNode =
-  if n == nil: return nil
-  if not isNil(n.comment) and startsWith(n.comment, "##"): return n
-  for i in countup(0, safeLen(n)-1):
-    result = findDocComment(n.sons[i])
-    if result != nil: return
-
-proc extractDocComment*(s: PSym, d: PDoc = nil): string =
-  let n = findDocComment(s.ast)
-  result = ""
-  if not n.isNil:
-    if not d.isNil:
-      var dummyHasToc: bool
-      renderRstToOut(d[], parseRst(n.comment, toFilename(n.info),
-                                   toLinenumber(n.info), toColumn(n.info),
-                                   dummyHasToc, d.options + {roSkipPounds}),
-                     result)
-    else:
-      result = n.comment.substr(2).replace("\n##", "\n").strip
+  proc extractDocComment*(s: PSym, d: PDoc = nil): string =
+    let n = findDocComment(s.ast)
+    result = ""
+    if not n.isNil:
+      if not d.isNil:
+        var dummyHasToc: bool
+        renderRstToOut(d[], parseRst(n.comment, toFilename(n.info),
+                                     toLinenumber(n.info), toColumn(n.info),
+                                     dummyHasToc, d.options + {roSkipPounds}),
+                       result)
+      else:
+        result = n.comment.substr(2).replace("\n##", "\n").strip
 
 proc isVisible(n: PNode): bool =
   result = false
@@ -440,11 +443,6 @@ proc genItem(d: PDoc, n, nameNode: PNode, k: TSymKind) =
       dispA(result, "<span class=\"Other\">$1</span>", "\\spanOther{$1}",
             [rope(esc(d.target, literal))])
 
-  if k in routineKinds and nameNode.kind == nkSym:
-    let att = attachToType(d, nameNode.sym)
-    if att != nil:
-      dispA(result, """<span class="attachedType" style="visibility:hidden">$1</span>""", "",
-        [rope esc(d.target, att.name.s)])
   inc(d.id)
   let
     plainNameRope = rope(xmltree.escape(plainName.strip))
@@ -459,25 +457,35 @@ proc genItem(d: PDoc, n, nameNode: PNode, k: TSymKind) =
 
   var seeSrcRope: Rope = nil
   let docItemSeeSrc = getConfigVar("doc.item.seesrc")
-  if docItemSeeSrc.len > 0 and options.docSeeSrcUrl.len > 0:
-    let path = n.info.toFilename.extractFilename.rope
-    let urlRope = ropeFormatNamedVars(options.docSeeSrcUrl,
-      ["path", "line"], [path, rope($n.info.line)])
+  if docItemSeeSrc.len > 0:
+    let cwd = getCurrentDir().canonicalizePath()
+    var path = n.info.toFullPath
+    if path.startsWith(cwd):
+      path = path[cwd.len+1 .. ^1].replace('\\', '/')
+    var commit = getConfigVar("git.commit")
+    if commit.len == 0: commit = "master"
     dispA(seeSrcRope, "$1", "", [ropeFormatNamedVars(docItemSeeSrc,
-        ["path", "line", "url"], [path,
-        rope($n.info.line), urlRope])])
+        ["path", "line", "url", "commit"], [rope path,
+        rope($n.info.line), rope getConfigVar("git.url"),
+        rope commit])])
 
   add(d.section[k], ropeFormatNamedVars(getConfigVar("doc.item"),
     ["name", "header", "desc", "itemID", "header_plain", "itemSym",
       "itemSymOrID", "itemSymEnc", "itemSymOrIDEnc", "seeSrc"],
     [nameRope, result, comm, itemIDRope, plainNameRope, plainSymbolRope,
       symbolOrIdRope, plainSymbolEncRope, symbolOrIdEncRope, seeSrcRope]))
+
+  var attype: Rope
+  if k in routineKinds and nameNode.kind == nkSym:
+    let att = attachToType(d, nameNode.sym)
+    if att != nil:
+      attype = rope esc(d.target, att.name.s)
   add(d.toc[k], ropeFormatNamedVars(getConfigVar("doc.item.toc"),
     ["name", "header", "desc", "itemID", "header_plain", "itemSym",
-      "itemSymOrID", "itemSymEnc", "itemSymOrIDEnc"],
+      "itemSymOrID", "itemSymEnc", "itemSymOrIDEnc", "attype"],
     [rope(getName(d, nameNode, d.splitAfter)), result, comm,
       itemIDRope, plainNameRope, plainSymbolRope, symbolOrIdRope,
-      plainSymbolEncRope, symbolOrIdEncRope]))
+      plainSymbolEncRope, symbolOrIdEncRope, attype]))
 
   # Ironically for types the complexSymbol is *cleaner* than the plainName
   # because it doesn't include object fields or documentation comments. So we
@@ -508,7 +516,7 @@ proc genJsonItem(d: PDoc, n, nameNode: PNode, k: TSymKind): JsonNode =
     result["code"] = %r.buf
 
 proc checkForFalse(n: PNode): bool =
-  result = n.kind == nkIdent and identEq(n.ident, "false")
+  result = n.kind == nkIdent and cmpIgnoreStyle(n.ident.s, "false") == 0
 
 proc traceDeps(d: PDoc, n: PNode) =
   const k = skModule
@@ -629,7 +637,9 @@ proc genOutFile(d: PDoc): Rope =
     # Modules get an automatic title for the HTML, but no entry in the index.
     title = "Module " & extractFilename(changeFileExt(d.filename, ""))
 
-  let bodyname = if d.hasToc: "doc.body_toc" else: "doc.body_no_toc"
+  let bodyname = if d.hasToc and not d.isPureRst: "doc.body_toc_group"
+                 elif d.hasToc: "doc.body_toc"
+                 else: "doc.body_no_toc"
   content = ropeFormatNamedVars(getConfigVar(bodyname), ["title",
       "tableofcontents", "moduledesc", "date", "time", "content"],
       [title.rope, toc, d.modDesc, rope(getDateStr()),
@@ -683,7 +693,7 @@ proc writeOutputJson*(d: PDoc, filename, outExt: string,
       discard "fixme: error report"
 
 proc commandDoc*() =
-  var ast = parseFile(gProjectMainIdx)
+  var ast = parseFile(gProjectMainIdx, newIdentCache())
   if ast == nil: return
   var d = newDocumentor(gProjectFull, options.gConfigVars)
   d.hasToc = true
@@ -694,6 +704,7 @@ proc commandDoc*() =
 proc commandRstAux(filename, outExt: string) =
   var filen = addFileExt(filename, "txt")
   var d = newDocumentor(filen, options.gConfigVars)
+  d.isPureRst = true
   var rst = parseRst(readFile(filen), filen, 0, 1, d.hasToc,
                      {roSupportRawDirective})
   var modDesc = newStringOfCap(30_000)
@@ -712,7 +723,7 @@ proc commandRst2TeX*() =
   commandRstAux(gProjectFull, TexExt)
 
 proc commandJson*() =
-  var ast = parseFile(gProjectMainIdx)
+  var ast = parseFile(gProjectMainIdx, newIdentCache())
   if ast == nil: return
   var d = newDocumentor(gProjectFull, options.gConfigVars)
   d.hasToc = true

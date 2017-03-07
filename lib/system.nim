@@ -98,7 +98,7 @@ type
   SomeNumber* = SomeInteger|SomeReal
     ## type class matching all number types
 
-proc defined*(x: expr): bool {.magic: "Defined", noSideEffect, compileTime.}
+proc defined*(x: untyped): bool {.magic: "Defined", noSideEffect, compileTime.}
   ## Special compile-time procedure that checks whether `x` is
   ## defined.
   ## `x` is an external symbol introduced through the compiler's
@@ -119,7 +119,7 @@ when defined(nimalias):
     TNumber: SomeNumber,
     TOrdinal: SomeOrdinal].}
 
-proc declared*(x: expr): bool {.magic: "Defined", noSideEffect, compileTime.}
+proc declared*(x: untyped): bool {.magic: "Defined", noSideEffect, compileTime.}
   ## Special compile-time procedure that checks whether `x` is
   ## declared. `x` has to be an identifier or a qualified identifier.
   ## This can be used to check whether a library provides a certain
@@ -133,11 +133,11 @@ proc declared*(x: expr): bool {.magic: "Defined", noSideEffect, compileTime.}
 when defined(useNimRtl):
   {.deadCodeElim: on.}
 
-proc definedInScope*(x: expr): bool {.
+proc definedInScope*(x: untyped): bool {.
   magic: "DefinedInScope", noSideEffect, deprecated, compileTime.}
   ## **Deprecated since version 0.9.6**: Use ``declaredInScope`` instead.
 
-proc declaredInScope*(x: expr): bool {.
+proc declaredInScope*(x: untyped): bool {.
   magic: "DefinedInScope", noSideEffect, compileTime.}
   ## Special compile-time procedure that checks whether `x` is
   ## declared in the current scope. `x` has to be an identifier.
@@ -160,7 +160,7 @@ proc unsafeAddr*[T](x: T): ptr T {.magic: "Addr", noSideEffect.} =
   ## Cannot be overloaded.
   discard
 
-proc `type`*(x: expr): typeDesc {.magic: "TypeOf", noSideEffect, compileTime.} =
+proc `type`*(x: untyped): typeDesc {.magic: "TypeOf", noSideEffect, compileTime.} =
   ## Builtin 'type' operator for accessing the type of an expression.
   ## Cannot be overloaded.
   discard
@@ -226,6 +226,7 @@ proc high*[T](x: T): T {.magic: "High", noSideEffect.}
   ##  var arr = [1,2,3,4,5,6,7]
   ##  high(arr) #=> 6
   ##  high(2) #=> 9223372036854775807
+  ##  high(int) #=> 9223372036854775807
 
 proc low*[T](x: T): T {.magic: "Low", noSideEffect.}
   ## returns the lowest possible index of an array, a sequence, a string or
@@ -236,6 +237,7 @@ proc low*[T](x: T): T {.magic: "Low", noSideEffect.}
   ##  var arr = [1,2,3,4,5,6,7]
   ##  low(arr) #=> 0
   ##  low(2) #=> -9223372036854775808
+  ##  low(int) #=> -9223372036854775808
 
 type
   range*{.magic: "Range".}[T] ## Generic type to construct range types.
@@ -433,6 +435,10 @@ type
     ## Raised if an IO error occurred.
     ##
     ## See the full `exception hierarchy`_.
+  EOFError* = object of IOError ## \
+    ## Raised if an IO "end of file" error occurred.
+    ##
+    ## See the full `exception hierarchy`_.
   OSError* = object of SystemError ## \
     ## Raised if an operating system service failed.
     ##
@@ -549,8 +555,6 @@ type
     ##
     ## See the full `exception hierarchy`_.
 
-  TResult* {.deprecated.} = enum Failure, Success
-
 {.deprecated: [TObject: RootObj, PObject: RootRef, TEffect: RootEffect,
   FTime: TimeEffect, FIO: IOEffect, FReadIO: ReadIOEffect,
   FWriteIO: WriteIOEffect, FExecIO: ExecIOEffect,
@@ -603,7 +607,7 @@ proc `<`*[T](x: Ordinal[T]): T {.magic: "UnaryLt", noSideEffect.}
   ## unary ``<`` that can be used for nice looking excluding ranges:
   ##
   ## .. code-block:: nim
-  ##   for i in 0 .. <10: echo i
+  ##   for i in 0 .. <10: echo i #=> 0 1 2 3 4 5 6 7 8 9
   ##
   ## Semantically this is the same as ``pred``.
 
@@ -868,29 +872,43 @@ when defined(nimnomagic64):
 else:
   proc `mod` *(x, y: int64): int64 {.magic: "ModI64", noSideEffect.}
 
-proc `shr` *(x, y: int): int {.magic: "ShrI", noSideEffect.}
-proc `shr` *(x, y: int8): int8 {.magic: "ShrI", noSideEffect.}
-proc `shr` *(x, y: int16): int16 {.magic: "ShrI", noSideEffect.}
-proc `shr` *(x, y: int32): int32 {.magic: "ShrI", noSideEffect.}
-proc `shr` *(x, y: int64): int64 {.magic: "ShrI", noSideEffect.}
-  ## computes the `shift right` operation of `x` and `y`, filling
-  ## vacant bit positions with zeros.
-  ##
-  ## .. code-block:: Nim
-  ##   0b0001_0000'i8 shr 2 == 0b0000_0100'i8
-  ##   0b1000_0000'i8 shr 8 == 0b0000_0000'i8
-  ##   0b0000_0001'i8 shr 1 == 0b0000_0000'i8
+when defined(nimNewShiftOps):
+  proc `shr` *(x: int, y: SomeInteger): int {.magic: "ShrI", noSideEffect.}
+  proc `shr` *(x: int8, y: SomeInteger): int8 {.magic: "ShrI", noSideEffect.}
+  proc `shr` *(x: int16, y: SomeInteger): int16 {.magic: "ShrI", noSideEffect.}
+  proc `shr` *(x: int32, y: SomeInteger): int32 {.magic: "ShrI", noSideEffect.}
+  proc `shr` *(x: int64, y: SomeInteger): int64 {.magic: "ShrI", noSideEffect.}
+    ## computes the `shift right` operation of `x` and `y`, filling
+    ## vacant bit positions with zeros.
+    ##
+    ## .. code-block:: Nim
+    ##   0b0001_0000'i8 shr 2 == 0b0000_0100'i8
+    ##   0b1000_0000'i8 shr 8 == 0b0000_0000'i8
+    ##   0b0000_0001'i8 shr 1 == 0b0000_0000'i8
 
-proc `shl` *(x, y: int): int {.magic: "ShlI", noSideEffect.}
-proc `shl` *(x, y: int8): int8 {.magic: "ShlI", noSideEffect.}
-proc `shl` *(x, y: int16): int16 {.magic: "ShlI", noSideEffect.}
-proc `shl` *(x, y: int32): int32 {.magic: "ShlI", noSideEffect.}
-proc `shl` *(x, y: int64): int64 {.magic: "ShlI", noSideEffect.}
-  ## computes the `shift left` operation of `x` and `y`.
-  ##
-  ## .. code-block:: Nim
-  ##  1'i32 shl 4  == 0x0000_0010
-  ##  1'i64 shl 4  == 0x0000_0000_0000_0010
+
+  proc `shl` *(x: int, y: SomeInteger): int {.magic: "ShlI", noSideEffect.}
+  proc `shl` *(x: int8, y: SomeInteger): int8 {.magic: "ShlI", noSideEffect.}
+  proc `shl` *(x: int16, y: SomeInteger): int16 {.magic: "ShlI", noSideEffect.}
+  proc `shl` *(x: int32, y: SomeInteger): int32 {.magic: "ShlI", noSideEffect.}
+  proc `shl` *(x: int64, y: SomeInteger): int64 {.magic: "ShlI", noSideEffect.}
+    ## computes the `shift left` operation of `x` and `y`.
+    ##
+    ## .. code-block:: Nim
+    ##  1'i32 shl 4 == 0x0000_0010
+    ##  1'i64 shl 4 == 0x0000_0000_0000_0010
+else:
+  proc `shr` *(x, y: int): int {.magic: "ShrI", noSideEffect.}
+  proc `shr` *(x, y: int8): int8 {.magic: "ShrI", noSideEffect.}
+  proc `shr` *(x, y: int16): int16 {.magic: "ShrI", noSideEffect.}
+  proc `shr` *(x, y: int32): int32 {.magic: "ShrI", noSideEffect.}
+  proc `shr` *(x, y: int64): int64 {.magic: "ShrI", noSideEffect.}
+
+  proc `shl` *(x, y: int): int {.magic: "ShlI", noSideEffect.}
+  proc `shl` *(x, y: int8): int8 {.magic: "ShlI", noSideEffect.}
+  proc `shl` *(x, y: int16): int16 {.magic: "ShlI", noSideEffect.}
+  proc `shl` *(x, y: int32): int32 {.magic: "ShlI", noSideEffect.}
+  proc `shl` *(x, y: int64): int64 {.magic: "ShlI", noSideEffect.}
 
 proc `and` *(x, y: int): int {.magic: "BitandI", noSideEffect.}
 proc `and` *(x, y: int8): int8 {.magic: "BitandI", noSideEffect.}
@@ -991,11 +1009,18 @@ proc `<%` *(x, y: int64): bool {.magic: "LtU64", noSideEffect.}
 proc `not`*[T: SomeUnsignedInt](x: T): T {.magic: "BitnotI", noSideEffect.}
   ## computes the `bitwise complement` of the integer `x`.
 
-proc `shr`*[T: SomeUnsignedInt](x, y: T): T {.magic: "ShrI", noSideEffect.}
-  ## computes the `shift right` operation of `x` and `y`.
+when defined(nimNewShiftOps):
+  proc `shr`*[T: SomeUnsignedInt](x: T, y: SomeInteger): T {.magic: "ShrI", noSideEffect.}
+    ## computes the `shift right` operation of `x` and `y`.
 
-proc `shl`*[T: SomeUnsignedInt](x, y: T): T {.magic: "ShlI", noSideEffect.}
-  ## computes the `shift left` operation of `x` and `y`.
+  proc `shl`*[T: SomeUnsignedInt](x: T, y: SomeInteger): T {.magic: "ShlI", noSideEffect.}
+    ## computes the `shift left` operation of `x` and `y`.
+else:
+  proc `shr`*[T: SomeUnsignedInt](x, y: T): T {.magic: "ShrI", noSideEffect.}
+    ## computes the `shift right` operation of `x` and `y`.
+
+  proc `shl`*[T: SomeUnsignedInt](x, y: T): T {.magic: "ShlI", noSideEffect.}
+    ## computes the `shift left` operation of `x` and `y`.
 
 proc `and`*[T: SomeUnsignedInt](x, y: T): T {.magic: "BitandI", noSideEffect.}
   ## computes the `bitwise and` of numbers `x` and `y`.
@@ -1270,12 +1295,14 @@ const
 
   seqShallowFlag = low(int)
 
+{.push profiler: off.}
 when defined(nimKnowsNimvm):
   let nimvm* {.magic: "Nimvm".}: bool = false
     ## may be used only in "when" expression.
     ## It is true in Nim VM context and false otherwise
 else:
   const nimvm*: bool = false
+{.pop.}
 
 proc compileOption*(option: string): bool {.
   magic: "CompileOption", noSideEffect.}
@@ -1313,20 +1340,20 @@ when defined(boehmgc):
 
 when taintMode:
   type TaintedString* = distinct string ## a distinct string type that
-                                        ## is `tainted`:idx:. It is an alias for
+                                        ## is `tainted`:idx:, see `taint mode
+                                        ## <manual.html#taint-mode>`_ for
+                                        ## details. It is an alias for
                                         ## ``string`` if the taint mode is not
-                                        ## turned on. Use the ``-d:taintMode``
-                                        ## command line switch to turn the taint
-                                        ## mode on.
+                                        ## turned on.
 
   proc len*(s: TaintedString): int {.borrow.}
 else:
   type TaintedString* = string          ## a distinct string type that
-                                        ## is `tainted`:idx:. It is an alias for
+                                        ## is `tainted`:idx:, see `taint mode
+                                        ## <manual.html#taint-mode>`_ for
+                                        ## details. It is an alias for
                                         ## ``string`` if the taint mode is not
-                                        ## turned on. Use the ``-d:taintMode``
-                                        ## command line switch to turn the taint
-                                        ## mode on.
+                                        ## turned on.
 
 when defined(profiler):
   proc nimProfile() {.compilerProc, noinline.}
@@ -1410,7 +1437,7 @@ proc del*[T](x: var seq[T], i: Natural) {.noSideEffect.} =
   ## This is an O(1) operation.
   ##
   ## .. code-block:: nim
-  ##  var i = @[1,2,3,4,5]
+  ##  var i = @[1, 2, 3, 4, 5]
   ##  i.del(2) #=> @[1, 2, 5, 4]
   let xl = x.len - 1
   shallowCopy(x[i], x[xl])
@@ -1421,7 +1448,7 @@ proc delete*[T](x: var seq[T], i: Natural) {.noSideEffect.} =
   ## This is an O(n) operation.
   ##
   ## .. code-block:: nim
-  ##  var i = @[1,2,3,4,5]
+  ##  var i = @[1, 2, 3, 4, 5]
   ##  i.delete(2) #=> @[1, 2, 4, 5]
   template defaultImpl =
     let xl = x.len
@@ -1440,8 +1467,8 @@ proc insert*[T](x: var seq[T], item: T, i = 0.Natural) {.noSideEffect.} =
   ## inserts `item` into `x` at position `i`.
   ##
   ## .. code-block:: nim
-  ##  var i = @[1,2,3,4,5]
-  ##  i.insert(2,4) #=> @[1, 2, 3, 4, 2, 5]
+  ##  var i = @[1, 2, 3, 4, 5]
+  ##  i.insert(2, 4) #=> @[1, 2, 3, 4, 2, 5]
   template defaultImpl =
     let xl = x.len
     setLen(x, xl+1)
@@ -1465,8 +1492,8 @@ proc repr*[T](x: T): string {.magic: "Repr", noSideEffect.}
   ## debugging tool.
   ##
   ## .. code-block:: nim
-  ##  var s: seq[string] = @["test2","test2"]
-  ##  var i = @[1,2,3,4,5]
+  ##  var s: seq[string] = @["test2", "test2"]
+  ##  var i = @[1, 2, 3, 4, 5]
   ##  repr(s) #=> 0x1055eb050[0x1055ec050"test2", 0x1055ec078"test2"]
   ##  repr(i) #=> 0x1055ed050[1, 2, 3, 4, 5]
 
@@ -1484,6 +1511,17 @@ type
     ## is an alias for the biggest floating point type the Nim
     ## compiler supports. Currently this is ``float64``, but it is
     ## platform-dependant in general.
+
+when defined(JS):
+  type BiggestUInt* = uint32
+    ## is an alias for the biggest unsigned integer type the Nim compiler
+    ## supports. Currently this is ``uint32`` for JS and ``uint64`` for other
+    ## targets.
+else:
+  type BiggestUInt* = uint64
+    ## is an alias for the biggest unsigned integer type the Nim compiler
+    ## supports. Currently this is ``uint32`` for JS and ``uint64`` for other
+    ## targets.
 
 {.deprecated: [TAddress: ByteAddress].}
 
@@ -1519,7 +1557,7 @@ type # these work for most platforms:
     ## This is the same as the type ``double`` in *C*.
   clongdouble* {.importc: "long double", nodecl.} = BiggestFloat
     ## This is the same as the type ``long double`` in *C*.
-    ## This C type is not supported by Nim's code generator
+    ## This C type is not supported by Nim's code generator.
 
   cuchar* {.importc: "unsigned char", nodecl.} = char
     ## This is the same as the type ``unsigned char`` in *C*.
@@ -1607,20 +1645,22 @@ when not defined(nimscript) and not defined(JS):
     ## Exactly ``size`` bytes will be overwritten. Like any procedure
     ## dealing with raw memory this is *unsafe*.
 
-  proc copyMem*(dest, source: pointer, size: Natural) {.inline, benign.}
+  proc copyMem*(dest, source: pointer, size: Natural) {.inline, benign,
+    tags: [], locks: 0.}
     ## copies the contents from the memory at ``source`` to the memory
     ## at ``dest``. Exactly ``size`` bytes will be copied. The memory
     ## regions may not overlap. Like any procedure dealing with raw
     ## memory this is *unsafe*.
 
-  proc moveMem*(dest, source: pointer, size: Natural) {.inline, benign.}
+  proc moveMem*(dest, source: pointer, size: Natural) {.inline, benign,
+    tags: [], locks: 0.}
     ## copies the contents from the memory at ``source`` to the memory
     ## at ``dest``. Exactly ``size`` bytes will be copied. The memory
     ## regions may overlap, ``moveMem`` handles this case appropriately
     ## and is thus somewhat more safe than ``copyMem``. Like any procedure
     ## dealing with raw memory this is still *unsafe*, though.
 
-  proc equalMem*(a, b: pointer, size: Natural): bool {.inline, noSideEffect.}
+  proc equalMem*(a, b: pointer, size: Natural): bool {.inline, noSideEffect, tags: [], locks: 0.}
     ## compares the memory blocks ``a`` and ``b``. ``size`` bytes will
     ## be compared. If the blocks are equal, true is returned, false
     ## otherwise. Like any procedure dealing with raw memory this is
@@ -1822,10 +1862,10 @@ const
   NimMajor*: int = 0
     ## is the major number of Nim's version.
 
-  NimMinor*: int = 14
+  NimMinor*: int = 16
     ## is the minor number of Nim's version.
 
-  NimPatch*: int = 3
+  NimPatch*: int = 1
     ## is the patch number of Nim's version.
 
   NimVersion*: string = $NimMajor & "." & $NimMinor & "." & $NimPatch
@@ -2174,25 +2214,34 @@ proc `&` *[T](x: T, y: seq[T]): seq[T] {.noSideEffect.} =
   for i in 0..y.len-1:
     result[i+1] = y[i]
 
-when not defined(nimscript):
-  when not defined(JS) or defined(nimphp):
-    proc seqToPtr[T](x: seq[T]): pointer {.inline, nosideeffect.} =
-      result = cast[pointer](x)
+proc `==` *[T](x, y: seq[T]): bool {.noSideEffect.} =
+  ## Generic equals operator for sequences: relies on a equals operator for
+  ## the element type `T`.
+  when nimvm:
+    if x.isNil and y.isNil:
+      return true
   else:
-    proc seqToPtr[T](x: seq[T]): pointer {.asmNoStackFrame, nosideeffect.} =
-      asm """return `x`"""
+    when not defined(JS) or defined(nimphp):
+      proc seqToPtr[T](x: seq[T]): pointer {.inline, nosideeffect.} =
+        result = cast[pointer](x)
+    else:
+      proc seqToPtr[T](x: seq[T]): pointer {.asmNoStackFrame, nosideeffect.} =
+        asm """return `x`"""
 
-  proc `==` *[T](x, y: seq[T]): bool {.noSideEffect.} =
-    ## Generic equals operator for sequences: relies on a equals operator for
-    ## the element type `T`.
     if seqToPtr(x) == seqToPtr(y):
-      result = true
-    elif seqToPtr(x) == nil or seqToPtr(y) == nil:
-      result = false
-    elif x.len == y.len:
-      for i in 0..x.len-1:
-        if x[i] != y[i]: return false
-      result = true
+      return true
+
+  if x.isNil or y.isNil:
+    return false
+
+  if x.len != y.len:
+    return false
+
+  for i in 0..x.len-1:
+    if x[i] != y[i]:
+      return false
+
+  return true
 
 proc find*[T, S](a: T, item: S): int {.inline.}=
   ## Returns the first index of `item` in `a` or -1 if not found. This requires
@@ -2219,7 +2268,7 @@ iterator fields*[T: tuple|object](x: T): RootObj {.
   ## iterates over every field of `x`. Warning: This really transforms
   ## the 'for' and unrolls the loop. The current implementation also has a bug
   ## that affects symbol binding in the loop body.
-iterator fields*[S:tuple|object, T:tuple|object](x: S, y: T): tuple[a,b: expr] {.
+iterator fields*[S:tuple|object, T:tuple|object](x: S, y: T): tuple[a,b: untyped] {.
   magic: "Fields", noSideEffect.}
   ## iterates over every field of `x` and `y`.
   ## Warning: This is really transforms the 'for' and unrolls the loop.
@@ -2260,7 +2309,7 @@ iterator fieldPairs*[T: tuple|object](x: T): RootObj {.
   ## current implementation also has a bug that affects symbol binding in the
   ## loop body.
 iterator fieldPairs*[S: tuple|object, T: tuple|object](x: S, y: T): tuple[
-  a, b: expr] {.
+  a, b: untyped] {.
   magic: "FieldPairs", noSideEffect.}
   ## iterates over every field of `x` and `y`.
   ## Warning: This really transforms the 'for' and unrolls the loop.
@@ -2323,7 +2372,11 @@ proc collectionToString[T: set | seq](x: T, b, e: string): string =
   var firstElement = true
   for value in items(x):
     if not firstElement: result.add(", ")
-    result.add($value)
+    when compiles(value.isNil):
+      if value.isNil: result.add "nil"
+      else: result.add($value)
+    else:
+      result.add($value)
     firstElement = false
   result.add(e)
 
@@ -2401,13 +2454,33 @@ when not defined(nimscript) and hasAlloc:
   proc GC_unref*(x: string) {.magic: "GCunref", benign.}
     ## see the documentation of `GC_ref`.
 
-template accumulateResult*(iter: expr) =
+template accumulateResult*(iter: untyped) =
   ## helps to convert an iterator to a proc.
   result = @[]
   for x in iter: add(result, x)
 
 # we have to compute this here before turning it off in except.nim anyway ...
 const NimStackTrace = compileOption("stacktrace")
+
+template coroutinesSupportedPlatform(): bool =
+  when defined(sparc) or defined(ELATE) or compileOption("gc", "v2") or 
+    defined(boehmgc) or defined(gogc) or defined(nogc) or defined(gcStack) or 
+    defined(gcMarkAndSweep):
+    false
+  else:
+    true
+
+when defined(nimCoroutines):
+  # Explicit opt-in.
+  when not coroutinesSupportedPlatform():
+    {.error: "Coroutines are not supported on this architecture and/or garbage collector.".}
+  const nimCoroutines* = true
+elif defined(noNimCoroutines):
+  # Explicit opt-out.
+  const nimCoroutines* = false
+else:
+  # Autodetect coroutine support.
+  const nimCoroutines* = false
 
 {.push checks: off.}
 # obviously we cannot generate checking operations here :-)
@@ -2516,19 +2589,22 @@ else:
   proc debugEcho*(x: varargs[expr, `$`]) {.magic: "Echo", noSideEffect,
                                              tags: [], raises: [].}
 
-template newException*(exceptn: typedesc, message: string): expr =
+template newException*(exceptn: typedesc, message: string;
+                       parentException: ref Exception = nil): untyped =
   ## creates an exception object of type ``exceptn`` and sets its ``msg`` field
   ## to `message`. Returns the new exception object.
   var
     e: ref exceptn
   new(e)
   e.msg = message
+  e.parent = parentException
   e
 
 when hostOS == "standalone":
   include "$projectpath/panicoverride"
 
 when not declared(sysFatal):
+  {.push profiler: off.}
   when hostOS == "standalone":
     proc sysFatal(exceptn: typedesc, message: string) {.inline.} =
       panic(message)
@@ -2548,6 +2624,7 @@ when not declared(sysFatal):
       new(e)
       e.msg = message & arg
       raise e
+  {.pop.}
 
 proc getTypeInfo*[T](x: T): pointer {.magic: "GetTypeInfo", benign.}
   ## get type information for `x`. Ordinary code should not use this, but
@@ -2576,13 +2653,22 @@ else:
     if x < 0: -x else: x
 {.pop.}
 
+type
+  FileSeekPos* = enum ## Position relative to which seek should happen
+                      # The values are ordered so that they match with stdio
+                      # SEEK_SET, SEEK_CUR and SEEK_END respectively.
+    fspSet            ## Seek to absolute value
+    fspCur            ## Seek relative to current position
+    fspEnd            ## Seek relative to end
+
 when not defined(JS): #and not defined(nimscript):
   {.push stack_trace: off, profiler:off.}
 
-  when not defined(nimscript) and not defined(nogc):
+  when hasAlloc:
     when not defined(gcStack):
-      proc initGC()
-    when not defined(boehmgc) and not defined(useMalloc) and not defined(gogc) and not defined(gcStack):
+      proc initGC() {.gcsafe.}
+    when not defined(boehmgc) and not defined(useMalloc) and
+        not defined(gogc) and not defined(gcStack):
       proc initAllocator() {.inline.}
 
     proc initStackBottom() {.inline, compilerproc.} =
@@ -2600,9 +2686,10 @@ when not defined(JS): #and not defined(nimscript):
       when declared(setStackBottom):
         setStackBottom(locals)
 
-  when hasAlloc:
+    {.push profiler: off.}
     var
       strDesc = TNimType(size: sizeof(string), kind: tyString, flags: {ntfAcyclic})
+    {.pop.}
 
 
   # ----------------- IO Part ------------------------------------------------
@@ -2614,12 +2701,14 @@ when not defined(JS): #and not defined(nimscript):
     FileMode* = enum           ## The file mode when opening a file.
       fmRead,                   ## Open the file for read access only.
       fmWrite,                  ## Open the file for write access only.
-      fmReadWrite,              ## Open the file for read and write access.
                                 ## If the file does not exist, it will be
                                 ## created.
+      fmReadWrite,              ## Open the file for read and write access.
+                                ## If the file does not exist, it will be
+                                ## created. Existing files will be cleared!
       fmReadWriteExisting,      ## Open the file for read and write access.
                                 ## If the file does not exist, it will not be
-                                ## created.
+                                ## created. The existing file will not be cleared.
       fmAppend                  ## Open the file for writing only; append data
                                 ## at the end.
 
@@ -2630,33 +2719,21 @@ when not defined(JS): #and not defined(nimscript):
 
   include "system/ansi_c"
 
-  when not defined(nimscript):
-    proc cmp(x, y: string): int =
-      result = int(c_strcmp(x, y))
-
-    proc zeroMem(p: pointer, size: Natural) =
-      c_memset(p, 0, size)
-    proc copyMem(dest, source: pointer, size: Natural) =
-      c_memcpy(dest, source, size)
-    proc moveMem(dest, source: pointer, size: Natural) =
-      c_memmove(dest, source, size)
-    proc equalMem(a, b: pointer, size: Natural): bool =
-      c_memcmp(a, b, size) == 0
-
-  else:
-    proc cmp(x, y: string): int =
+  proc cmp(x, y: string): int =
+    when nimvm:
       if x < y: result = -1
       elif x > y: result = 1
       else: result = 0
+    else:
+      result = int(c_strcmp(x, y))
 
   when defined(nimscript):
     proc readFile*(filename: string): string {.tags: [ReadIOEffect], benign.}
-      ## Opens a file named `filename` for reading.
-      ##
-      ## Then calls `readAll <#readAll>`_ and closes the file afterwards.
-      ## Returns the string.  Raises an IO exception in case of an error. If
-      ## you need to call this inside a compile time macro you can use
-      ## `staticRead <#staticRead>`_.
+      ## Opens a file named `filename` for reading, calls `readAll
+      ## <#readAll>`_ and closes the file afterwards. Returns the string.
+      ## Raises an IO exception in case of an error. If # you need to call
+      ## this inside a compile time macro you can use `staticRead
+      ## <#staticRead>`_.
 
     proc writeFile*(filename, content: string) {.tags: [WriteIOEffect], benign.}
       ## Opens a file named `filename` for writing. Then writes the
@@ -2677,14 +2754,16 @@ when not defined(JS): #and not defined(nimscript):
     when defined(windows):
       # work-around C's sucking abstraction:
       # BUGFIX: stdin and stdout should be binary files!
-      proc c_setmode(handle, mode: cint) {.importc: "_setmode",
-                                           header: "<io.h>".}
+      proc c_setmode(handle, mode: cint) {.
+        importc: when defined(bcc): "setmode" else: "_setmode",
+        header: "<io.h>".}
       var
         O_BINARY {.importc: "O_BINARY", nodecl.}: cint
 
       # we use binary mode on Windows:
       c_setmode(c_fileno(stdin), O_BINARY)
       c_setmode(c_fileno(stdout), O_BINARY)
+      c_setmode(c_fileno(stderr), O_BINARY)
 
     when defined(endb):
       proc endbStep()
@@ -2730,14 +2809,15 @@ when not defined(JS): #and not defined(nimscript):
     proc setStdIoUnbuffered*() {.tags: [], benign.}
       ## Configures `stdin`, `stdout` and `stderr` to be unbuffered.
 
-    proc close*(f: File) {.tags: [].}
+    proc close*(f: File) {.tags: [], gcsafe.}
       ## Closes the file.
 
     proc endOfFile*(f: File): bool {.tags: [], benign.}
       ## Returns true iff `f` is at the end.
 
-    proc readChar*(f: File): char {.tags: [ReadIOEffect].}
-      ## Reads a single character from the stream `f`.
+    proc readChar*(f: File): char {.tags: [ReadIOEffect], deprecated.}
+      ## Reads a single character from the stream `f`. **Deprecated** since
+      ## version 0.16.2. Use some variant of ``readBuffer`` instead.
 
     proc flushFile*(f: File) {.tags: [WriteIOEffect].}
       ## Flushes `f`'s buffer.
@@ -2792,7 +2872,7 @@ when not defined(JS): #and not defined(nimscript):
 
     proc writeLine*[Ty](f: File, x: varargs[Ty, `$`]) {.inline,
                              tags: [WriteIOEffect], benign.}
-      ## writes the values `x` to `f` and then writes "\n".
+      ## writes the values `x` to `f` and then writes "\\n".
       ## May throw an IO exception.
 
     proc getFileSize*(f: File): int64 {.tags: [ReadIOEffect], benign.}
@@ -2837,7 +2917,7 @@ when not defined(JS): #and not defined(nimscript):
       ## file `f`. Returns the number of actual written bytes, which may be less
       ## than `len` in case of an error.
 
-    proc setFilePos*(f: File, pos: int64) {.benign.}
+    proc setFilePos*(f: File, pos: int64, relativeTo: FileSeekPos = fspSet) {.benign.}
       ## sets the position of the file pointer that is used for read/write
       ## operations. The file's first byte has the index zero.
 
@@ -2923,18 +3003,37 @@ when not defined(JS): #and not defined(nimscript):
       ## allows you to override the behaviour of your application when CTRL+C
       ## is pressed. Only one such hook is supported.
 
-    proc writeStackTrace*() {.tags: [WriteIOEffect].}
+    proc writeStackTrace*() {.tags: [WriteIOEffect], gcsafe.}
       ## writes the current stack trace to ``stderr``. This is only works
       ## for debug builds.
     when hostOS != "standalone":
-      proc getStackTrace*(): string
+      proc getStackTrace*(): string {.gcsafe.}
         ## gets the current stack trace. This only works for debug builds.
 
-      proc getStackTrace*(e: ref Exception): string
+      proc getStackTrace*(e: ref Exception): string {.gcsafe.}
         ## gets the stack trace associated with `e`, which is the stack that
         ## lead to the ``raise`` statement. This only works for debug builds.
 
     {.push stack_trace: off, profiler:off.}
+    when defined(memtracker):
+      include "system/memtracker"
+
+    when not defined(nimscript):
+      proc zeroMem(p: pointer, size: Natural) =
+        c_memset(p, 0, size)
+        when declared(memTrackerOp):
+          memTrackerOp("zeroMem", p, size)
+      proc copyMem(dest, source: pointer, size: Natural) =
+        c_memcpy(dest, source, size)
+        when declared(memTrackerOp):
+          memTrackerOp("copyMem", dest, size)
+      proc moveMem(dest, source: pointer, size: Natural) =
+        c_memmove(dest, source, size)
+        when declared(memTrackerOp):
+          memTrackerOp("moveMem", dest, size)
+      proc equalMem(a, b: pointer, size: Natural): bool =
+        c_memcmp(a, b, size) == 0
+
     when hostOS == "standalone":
       include "system/embedded"
     else:
@@ -2977,7 +3076,9 @@ when not defined(JS): #and not defined(nimscript):
       else:
         result = n.sons[n.len]
 
+    {.push profiler:off.}
     when hasAlloc: include "system/mmdisp"
+    {.pop.}
     {.push stack_trace: off, profiler:off.}
     when hasAlloc: include "system/sysstr"
     {.pop.}
@@ -3068,20 +3169,20 @@ when not defined(JS): #and not defined(nimscript):
       ## retrieves the raw proc pointer of the closure `x`. This is
       ## useful for interfacing closures with C.
       {.emit: """
-      `result` = `x`.ClPrc;
+      `result` = `x`.ClP_0;
       """.}
 
     proc rawEnv*[T: proc](x: T): pointer {.noSideEffect, inline.} =
       ## retrieves the raw environment pointer of the closure `x`. This is
       ## useful for interfacing closures with C.
       {.emit: """
-      `result` = `x`.ClEnv;
+      `result` = `x`.ClE_0;
       """.}
 
     proc finished*[T: proc](x: T): bool {.noSideEffect, inline.} =
       ## can be used to determine if a first class iterator has finished.
       {.emit: """
-      `result` = *((NI*) `x`.ClEnv) < 0;
+      `result` = *((NI*) `x`.ClE_0) < 0;
       """.}
 
 elif defined(JS):
@@ -3189,19 +3290,18 @@ proc `/`*(x, y: int): float {.inline, noSideEffect.} =
 
 template spliceImpl(s, a, L, b: untyped): untyped =
   # make room for additional elements or cut:
-  var slen = s.len
-  var shift = b.len - L
-  var newLen = slen + shift
+  var shift = b.len - max(0,L)  # ignore negative slice size
+  var newLen = s.len + shift
   if shift > 0:
     # enlarge:
     setLen(s, newLen)
-    for i in countdown(newLen-1, a+shift+1): shallowCopy(s[i], s[i-shift])
+    for i in countdown(newLen-1, a+b.len): shallowCopy(s[i], s[i-shift])
   else:
-    for i in countup(a+b.len, s.len-1+shift): shallowCopy(s[i], s[i-shift])
+    for i in countup(a+b.len, newLen-1): shallowCopy(s[i], s[i-shift])
     # cut down:
     setLen(s, newLen)
   # fill the hole:
-  for i in 0 .. <b.len: s[i+a] = b[i]
+  for i in 0 .. <b.len: s[a+i] = b[i]
 
 when hasAlloc or defined(nimscript):
   proc `[]`*(s: string, x: Slice[int]): string {.inline.} =
@@ -3309,11 +3409,16 @@ proc staticExec*(command: string, input = "", cache = ""): string {.
   ## If ``cache`` is not empty, the results of ``staticExec`` are cached within
   ## the ``nimcache`` directory. Use ``--forceBuild`` to get rid of this caching
   ## behaviour then. ``command & input & cache`` (the concatenated string) is
-  ## used to determine wether the entry in the cache is still valid. You can
+  ## used to determine whether the entry in the cache is still valid. You can
   ## use versioning information for ``cache``:
   ##
   ## .. code-block:: nim
   ##     const stateMachine = staticExec("dfaoptimizer", "input", "0.8.0")
+
+proc gorgeEx*(command: string, input = "", cache = ""): tuple[output: string,
+                                                              exitCode: int] =
+  ## Same as `gorge` but also returns the precious exit code.
+  discard
 
 proc `+=`*[T: SomeOrdinal|uint|uint64](x: var T, y: T) {.
   magic: "Inc", noSideEffect.}
@@ -3535,7 +3640,7 @@ when hasAlloc:
       x[j+i] = item[j]
       inc(j)
 
-proc compiles*(x: expr): bool {.magic: "Compiles", noSideEffect, compileTime.} =
+proc compiles*(x: untyped): bool {.magic: "Compiles", noSideEffect, compileTime.} =
   ## Special compile-time procedure that checks whether `x` can be compiled
   ## without any semantic error.
   ## This can be used to check whether a type supports some operation:
@@ -3599,7 +3704,7 @@ when hasAlloc and not defined(nimscript) and not defined(JS):
 
   include "system/deepcopy"
 
-proc procCall*(x: expr) {.magic: "ProcCall", compileTime.} =
+proc procCall*(x: untyped) {.magic: "ProcCall", compileTime.} =
   ## special magic to prohibit dynamic binding for `method`:idx: calls.
   ## This is similar to `super`:idx: in ordinary OO languages.
   ##
@@ -3675,7 +3780,7 @@ template closureScope*(body: untyped): untyped =
 when defined(nimconfig):
   include "system/nimscript"
 
-when defined(windows) and appType == "console" and not defined(nimconfig):
+when defined(windows) and appType == "console" and defined(nimSetUtf8CodePage):
   proc setConsoleOutputCP(codepage: cint): cint {.stdcall, dynlib: "kernel32",
     importc: "SetConsoleOutputCP".}
   discard setConsoleOutputCP(65001) # 65001 - utf-8 codepage

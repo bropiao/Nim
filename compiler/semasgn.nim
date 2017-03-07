@@ -105,7 +105,7 @@ proc considerOverloadedOp(c: var TLiftCtx; t: PType; body, x, y: PNode): bool =
   of attachedDestructor:
     let op = t.destructor
     if op != nil:
-      markUsed(c.info, op)
+      markUsed(c.info, op, c.c.graph.usageSym)
       styleCheckUse(c.info, op)
       body.add newDestructorCall(op, x)
       result = true
@@ -123,14 +123,14 @@ proc considerOverloadedOp(c: var TLiftCtx; t: PType; body, x, y: PNode): bool =
         op = t.assignment
         if op == nil:
           op = liftBody(c.c, t, c.info)
-      markUsed(c.info, op)
+      markUsed(c.info, op, c.c.graph.usageSym)
       styleCheckUse(c.info, op)
       body.add newAsgnCall(c.c, op, x, y)
       result = true
   of attachedDeepCopy:
     let op = t.deepCopy
     if op != nil:
-      markUsed(c.info, op)
+      markUsed(c.info, op, c.c.graph.usageSym)
       styleCheckUse(c.info, op)
       body.add newDeepCopyCall(op, x, y)
       result = true
@@ -187,7 +187,7 @@ proc liftBodyAux(c: var TLiftCtx; t: PType; body, x, y: PNode) =
   of tyPointer, tySet, tyBool, tyChar, tyEnum, tyInt..tyUInt64, tyCString,
       tyPtr, tyString, tyRef:
     defaultOp(c, t, body, x, y)
-  of tyArrayConstr, tyArray, tySequence:
+  of tyArray, tySequence:
     if tfHasAsgn in t.flags:
       if t.kind == tySequence:
         # XXX add 'nil' handling here
@@ -203,7 +203,8 @@ proc liftBodyAux(c: var TLiftCtx; t: PType; body, x, y: PNode) =
       defaultOp(c, t, body, x, y)
   of tyObject, tyDistinct:
     if not considerOverloadedOp(c, t, body, x, y):
-      if t.sons[0] != nil: liftBodyAux(c, t.sons[0], body, x, y)
+      if t.sons[0] != nil:
+        liftBodyAux(c, t.sons[0].skipTypes(skipPtrs), body, x, y)
       if t.kind == tyObject: liftBodyObj(c, t.n, body, x, y)
   of tyTuple:
     liftBodyTup(c, t, body, x, y)
@@ -220,14 +221,15 @@ proc liftBodyAux(c: var TLiftCtx; t: PType; body, x, y: PNode) =
       body.add newAsgnStmt(x, call)
   of tyVarargs, tyOpenArray:
     localError(c.info, errGenerated, "cannot copy openArray")
-  of tyFromExpr, tyIter, tyProxy, tyBuiltInTypeClass, tyUserTypeClass,
+  of tyFromExpr, tyProxy, tyBuiltInTypeClass, tyUserTypeClass,
      tyUserTypeClassInst, tyCompositeTypeClass, tyAnd, tyOr, tyNot, tyAnything,
-     tyMutable, tyGenericParam, tyGenericBody, tyNil, tyExpr, tyStmt,
-     tyTypeDesc, tyGenericInvocation, tyBigNum, tyConst, tyForward:
+     tyGenericParam, tyGenericBody, tyNil, tyExpr, tyStmt,
+     tyTypeDesc, tyGenericInvocation, tyForward:
     internalError(c.info, "assignment requested for type: " & typeToString(t))
   of tyOrdinal, tyRange,
-     tyGenericInst, tyFieldAccessor, tyStatic, tyVar:
+     tyGenericInst, tyFieldAccessor, tyStatic, tyVar, tyAlias:
     liftBodyAux(c, lastSon(t), body, x, y)
+  of tyUnused, tyUnused0, tyUnused1, tyUnused2: internalError("liftBodyAux")
 
 proc newProcType(info: TLineInfo; owner: PSym): PType =
   result = newType(tyProc, owner)
@@ -246,6 +248,7 @@ proc addParam(procType: PType; param: PSym) =
 proc liftBody(c: PContext; typ: PType; info: TLineInfo): PSym =
   var a: TLiftCtx
   a.info = info
+  a.c = c
   let body = newNodeI(nkStmtList, info)
   result = newSym(skProc, getIdent":lifted=", typ.owner, info)
   a.fn = result
@@ -274,7 +277,7 @@ proc liftBody(c: PContext; typ: PType; info: TLineInfo): PSym =
   #echo "Produced this ", n
 
 proc getAsgnOrLiftBody(c: PContext; typ: PType; info: TLineInfo): PSym =
-  let t = typ.skipTypes({tyGenericInst, tyVar})
+  let t = typ.skipTypes({tyGenericInst, tyVar, tyAlias})
   result = t.assignment
   if result.isNil:
     result = liftBody(c, t, info)

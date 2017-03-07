@@ -11,11 +11,21 @@
 ##
 ## This module implements boilerplate to make unit testing easy.
 ##
+## The test status and name is printed after any output or traceback.
+##
 ## Example:
 ##
 ## .. code:: nim
 ##
 ##   suite "description for this stuff":
+##     echo "suite setup: run once before the tests"
+##
+##     setup:
+##       echo "run before each test"
+##
+##     teardown:
+##       echo "run after each test"
+##
 ##     test "essential truths":
 ##       # give up and stop if this fails
 ##       require(true)
@@ -30,6 +40,15 @@
 ##       let v = @[1, 2, 3]  # you can do initialization here
 ##       expect(IndexError):
 ##         discard v[4]
+##
+##     echo "suite teardown: run once after the tests"
+##
+##
+## Tests can be nested, however failure of a nested test will not mark the
+## parent test as failed. Setup and teardown are inherited. Setup can be
+## overridden locally.
+## Compiled test files return the number of failed test as exit code, while
+## nim c -r <testfile.nim> exits with 0 or 1
 
 import
   macros
@@ -78,10 +97,10 @@ proc shouldRun(testName: string): bool =
   result = true
 
 proc startSuite(name: string) =
-  template rawPrint() = echo("\n[Suite] ", name) 
+  template rawPrint() = echo("\n[Suite] ", name)
   when not defined(ECMAScript):
     if colorOutput:
-      styledEcho styleBright, fgBlue, "\n[Suite] ", fgWhite, name
+      styledEcho styleBright, fgBlue, "\n[Suite] ", resetStyle, name
     else: rawPrint()
   else: rawPrint()
 
@@ -117,15 +136,15 @@ template suite*(name, body) {.dirty.} =
   ##    [OK] (2 + -2) != 4
   block:
     bind startSuite
-    template setup(setupBody: untyped) {.dirty.} =
-      var testSetupIMPLFlag = true
+    template setup(setupBody: untyped) {.dirty, used.} =
+      var testSetupIMPLFlag {.used.} = true
       template testSetupIMPL: untyped {.dirty.} = setupBody
 
-    template teardown(teardownBody: untyped) {.dirty.} =
-      var testTeardownIMPLFlag = true
+    template teardown(teardownBody: untyped) {.dirty, used.} =
+      var testTeardownIMPLFlag {.used.} = true
       template testTeardownIMPL: untyped {.dirty.} = teardownBody
 
-    let testInSuiteImplFlag = true
+    let testInSuiteImplFlag {.used.} = true
     startSuite name
     body
 
@@ -142,7 +161,7 @@ proc testDone(name: string, s: TestStatus, indent: bool) =
                     of FAILED: fgRed
                     of SKIPPED: fgYellow
                     else: fgWhite
-        styledEcho styleBright, color, prefix, "[", $s, "] ", fgWhite, name
+        styledEcho styleBright, color, prefix, "[", $s, "] ", resetStyle, name
       else:
         rawPrint()
     else:
@@ -226,10 +245,11 @@ template fail* =
   checkpoints = @[]
 
 template skip* =
-  ## Makes test to be skipped. Should be used directly
+  ## Mark the test as skipped. Should be used directly
   ## in case when it is not possible to perform test
   ## for reasons depending on outer environment,
   ## or certain application logic conditions or configurations.
+  ## The test code is still executed.
   ##
   ## .. code-block:: nim
   ##
@@ -250,12 +270,12 @@ macro check*(conditions: untyped): untyped =
   ##
   ##  import strutils
   ##
-  ##  check("AKB48".toLower() == "akb48")
+  ##  check("AKB48".toLowerAscii() == "akb48")
   ##
   ##  let teams = {'A', 'K', 'B', '4', '8'}
   ##
   ##  check:
-  ##    "AKB48".toLower() == "akb48"
+  ##    "AKB48".toLowerAscii() == "akb48"
   ##    'C' in teams
   let checked = callsite()[1]
   var
@@ -362,8 +382,7 @@ macro expect*(exceptions: varargs[typed], body: untyped): untyped =
   ##  expect IOError, OSError, ValueError, AssertionError:
   ##    defectiveRobot()
   let exp = callsite()
-  template expectBody(errorTypes, lineInfoLit: expr,
-                      body: stmt): NimNode {.dirty.} =
+  template expectBody(errorTypes, lineInfoLit, body): NimNode {.dirty.} =
     try:
       body
       checkpoint(lineInfoLit & ": Expect Failed, no exception was thrown.")

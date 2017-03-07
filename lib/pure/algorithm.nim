@@ -46,7 +46,7 @@ proc reverse*[T](a: var openArray[T], first, last: Natural) =
 
 proc reverse*[T](a: var openArray[T]) =
   ## reverses the array `a`.
-  reverse(a, 0, a.high)
+  reverse(a, 0, max(0, a.high))
 
 proc reversed*[T](a: openArray[T], first: Natural, last: int): seq[T] =
   ## returns the reverse of the array `a[first..last]`.
@@ -179,7 +179,7 @@ proc sort*[T](a: var openArray[T],
   ##    sort(myStrArray, system.cmp)
   ##
   ## You can inline adhoc comparison procs with the `do notation
-  ## <manual.html#do-notation>`_. Example:
+  ## <manual.html#procedures-do-notation>`_. Example:
   ##
   ## .. code-block:: nim
   ##

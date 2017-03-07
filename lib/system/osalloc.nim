@@ -81,22 +81,27 @@ elif defined(posix):
   const
     PROT_READ  = 1             # page can be read
     PROT_WRITE = 2             # page can be written
-    MAP_PRIVATE = 2'i32        # Changes are private
 
   when defined(macosx) or defined(bsd):
     const MAP_ANONYMOUS = 0x1000
+    const MAP_PRIVATE = 0x02        # Changes are private
   elif defined(solaris):
     const MAP_ANONYMOUS = 0x100
-  elif defined(linux):
+    const MAP_PRIVATE = 0x02        # Changes are private
+  elif defined(linux) and defined(amd64):
+    # actually, any architecture using asm-generic, but being conservative here,
+    # some arches like mips and alpha use different values
     const MAP_ANONYMOUS = 0x20
+    const MAP_PRIVATE = 0x02        # Changes are private
   else:
     var
       MAP_ANONYMOUS {.importc: "MAP_ANONYMOUS", header: "<sys/mman.h>".}: cint
+      MAP_PRIVATE {.importc: "MAP_PRIVATE", header: "<sys/mman.h>".}: cint
 
-  proc mmap(adr: pointer, len: int, prot, flags, fildes: cint,
+  proc mmap(adr: pointer, len: csize, prot, flags, fildes: cint,
             off: int): pointer {.header: "<sys/mman.h>".}
 
-  proc munmap(adr: pointer, len: int): cint {.header: "<sys/mman.h>".}
+  proc munmap(adr: pointer, len: csize): cint {.header: "<sys/mman.h>".}
 
   proc osAllocPages(size: int): pointer {.inline.} =
     result = mmap(nil, size, PROT_READ or PROT_WRITE,
@@ -127,7 +132,7 @@ elif defined(windows):
                     header: "<windows.h>", stdcall, importc: "VirtualAlloc".}
 
   proc virtualFree(lpAddress: pointer, dwSize: int,
-                   dwFreeType: int32) {.header: "<windows.h>", stdcall,
+                   dwFreeType: int32): cint {.header: "<windows.h>", stdcall,
                    importc: "VirtualFree".}
 
   proc osAllocPages(size: int): pointer {.inline.} =
@@ -146,7 +151,10 @@ elif defined(windows):
     # Windows :-(. We have to live with MEM_DECOMMIT instead.
     # Well that used to be the case but MEM_DECOMMIT fragments the address
     # space heavily, so we now treat Windows as a strange unmap target.
-    when reallyOsDealloc: virtualFree(p, 0, MEM_RELEASE)
+    when reallyOsDealloc:
+      if virtualFree(p, 0, MEM_RELEASE) == 0:
+        cprintf "yes, failing!"
+        quit 1
     #VirtualFree(p, size, MEM_DECOMMIT)
 
 elif hostOS == "standalone":

@@ -39,8 +39,10 @@
 
 import math
 
+{.warning: "`queues` module is deprecated - use `deques` instead".}
+
 type
-  Queue*[T] = object ## A queue.
+  Queue* {.deprecated.} [T] = object ## A queue.
     data: seq[T]
     rd, wr, count, mask: int
 
@@ -142,7 +144,7 @@ proc add*[T](q: var Queue[T], item: T) =
   var cap = q.mask+1
   if unlikely(q.count >= cap):
     var n = newSeq[T](cap*2)
-    for i, x in q:  # don't use copyMem because the GC and because it's slower.
+    for i, x in pairs(q):  # don't use copyMem because the GC and because it's slower.
       shallowCopy(n[i], x)
     shallowCopy(q.data, n)
     q.mask = cap*2 - 1
@@ -152,7 +154,10 @@ proc add*[T](q: var Queue[T], item: T) =
   q.data[q.wr] = item
   q.wr = (q.wr + 1) and q.mask
 
-proc default[T](t: typedesc[T]): T {.inline.} = discard
+template default[T](t: typedesc[T]): T =
+  var v: T
+  v
+
 proc pop*[T](q: var Queue[T]): T {.inline, discardable.} =
   ## Remove and returns the first (oldest) element of the queue `q`.
   emptyCheck(q)

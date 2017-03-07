@@ -31,9 +31,11 @@ implements the required case distinction.
 
 import
   ast, astalgo, strutils, hashes, trees, platform, magicsys, extccomp, options,
-  nversion, nimsets, msgs, securehash, bitsets, idents, lists, types, os,
+  nversion, nimsets, msgs, securehash, bitsets, idents, types, os,
   times, ropes, math, passes, ccgutils, wordrecg, renderer, rodread, rodutils,
   intsets, cgmeth, lowerings
+
+from modulegraphs import ModuleGraph
 
 type
   TTarget = enum
@@ -137,8 +139,8 @@ proc declareGlobal(p: PProc; id: int; r: Rope) =
     p.locals.addf("global $1;$n", [r])
 
 const
-  MappedToObject = {tyObject, tyArray, tyArrayConstr, tyTuple, tyOpenArray,
-    tySet, tyBigNum, tyVarargs}
+  MappedToObject = {tyObject, tyArray, tyTuple, tyOpenArray,
+    tySet, tyVarargs}
 
 proc mapType(typ: PType): TJSTypeKind =
   let t = skipTypes(typ, abstractInst)
@@ -151,35 +153,57 @@ proc mapType(typ: PType): TJSTypeKind =
   of tyPointer:
     # treat a tyPointer like a typed pointer to an array of bytes
     result = etyBaseIndex
-  of tyRange, tyDistinct, tyOrdinal, tyConst, tyMutable, tyIter, tyProxy:
+  of tyRange, tyDistinct, tyOrdinal, tyProxy:
     result = mapType(t.sons[0])
   of tyInt..tyInt64, tyUInt..tyUInt64, tyEnum, tyChar: result = etyInt
   of tyBool: result = etyBool
   of tyFloat..tyFloat128: result = etyFloat
   of tySet: result = etyObject # map a set to a table
   of tyString, tySequence: result = etySeq
-  of tyObject, tyArray, tyArrayConstr, tyTuple, tyOpenArray, tyBigNum,
-     tyVarargs:
+  of tyObject, tyArray, tyTuple, tyOpenArray, tyVarargs:
     result = etyObject
   of tyNil: result = etyNull
   of tyGenericInst, tyGenericParam, tyGenericBody, tyGenericInvocation,
      tyNone, tyFromExpr, tyForward, tyEmpty, tyFieldAccessor,
-     tyExpr, tyStmt, tyTypeDesc, tyTypeClasses, tyVoid:
+     tyExpr, tyStmt, tyTypeDesc, tyTypeClasses, tyVoid, tyAlias:
     result = etyNone
   of tyStatic:
     if t.n != nil: result = mapType(lastSon t)
     else: result = etyNone
   of tyProc: result = etyProc
   of tyCString: result = etyString
+  of tyUnused, tyUnused0, tyUnused1, tyUnused2: internalError("mapType")
 
 proc mapType(p: PProc; typ: PType): TJSTypeKind =
   if p.target == targetPHP: result = etyObject
   else: result = mapType(typ)
 
 proc mangleName(s: PSym; target: TTarget): Rope =
+  proc validJsName(name: string): bool =
+    result = true
+    const reservedWords = ["abstract", "await", "boolean", "break", "byte",
+      "case", "catch", "char", "class", "const", "continue", "debugger",
+      "default", "delete", "do", "double", "else", "enum", "export", "extends",
+      "false", "final", "finally", "float", "for", "function", "goto", "if",
+      "implements", "import", "in", "instanceof", "int", "interface", "let",
+      "long", "native", "new", "null", "package", "private", "protected",
+      "public", "return", "short", "static", "super", "switch", "synchronized",
+      "this", "throw", "throws", "transient", "true", "try", "typeof", "var",
+      "void", "volatile", "while", "with", "yield"]
+    case name
+    of reservedWords:
+      return false
+    else:
+      discard
+    if name[0] in {'0'..'9'}: return false
+    for chr in name:
+      if chr notin {'A'..'Z','a'..'z','_','$','0'..'9'}:
+        return false
   result = s.loc.r
   if result == nil:
-    if target == targetJS or s.kind == skTemp:
+    if s.kind == skField and s.name.s.validJsName:
+      result = rope(s.name.s)
+    elif target == targetJS or s.kind == skTemp:
       result = rope(mangle(s.name.s))
     else:
       var x = newStringOfCap(s.name.s.len)
@@ -795,8 +819,8 @@ proc generateHeader(p: PProc, typ: PType): Rope =
         add(result, name)
         add(result, "_Idx")
     elif not (i == 1 and param.name.s == "this"):
-      let k = param.typ.skipTypes({tyGenericInst}).kind
-      if k in { tyVar, tyRef, tyPtr, tyPointer }:
+      let k = param.typ.skipTypes({tyGenericInst, tyAlias}).kind
+      if k in {tyVar, tyRef, tyPtr, tyPointer}:
         add(result, "&")
       add(result, "$")
       add(result, name)
@@ -963,7 +987,7 @@ proc genArrayAddr(p: PProc, n: PNode, r: var TCompRes) =
   internalAssert a.typ != etyBaseIndex and b.typ != etyBaseIndex
   r.address = a.res
   var typ = skipTypes(m.sons[0].typ, abstractPtrs)
-  if typ.kind in {tyArray, tyArrayConstr}: first = firstOrd(typ.sons[0])
+  if typ.kind == tyArray: first = firstOrd(typ.sons[0])
   else: first = 0
   if optBoundsCheck in p.options and not isConstExpr(m.sons[1]):
     useMagic(p, "chckIndx")
@@ -984,8 +1008,7 @@ proc genArrayAccess(p: PProc, n: PNode, r: var TCompRes) =
   var ty = skipTypes(n.sons[0].typ, abstractVarRange)
   if ty.kind in {tyRef, tyPtr}: ty = skipTypes(ty.lastSon, abstractVarRange)
   case ty.kind
-  of tyArray, tyArrayConstr, tyOpenArray, tySequence, tyString, tyCString,
-     tyVarargs:
+  of tyArray, tyOpenArray, tySequence, tyString, tyCString, tyVarargs:
     genArrayAddr(p, n, r)
   of tyTuple:
     if p.target == targetPHP:
@@ -1065,8 +1088,7 @@ proc genAddr(p: PProc, n: PNode, r: var TCompRes) =
     else:
       let kindOfIndexedExpr = skipTypes(n.sons[0].sons[0].typ, abstractVarRange).kind
       case kindOfIndexedExpr
-      of tyArray, tyArrayConstr, tyOpenArray, tySequence, tyString, tyCString,
-          tyVarargs:
+      of tyArray, tyOpenArray, tySequence, tyString, tyCString, tyVarargs:
         genArrayAddr(p, n.sons[0], r)
       of tyTuple:
         genFieldAddr(p, n.sons[0], r)
@@ -1173,11 +1195,12 @@ proc genDeref(p: PProc, n: PNode, r: var TCompRes) =
   else:
     var a: TCompRes
     gen(p, n.sons[0], a)
+    r.kind = resExpr
     if a.typ == etyBaseIndex:
       r.res = "$1[$2]" % [a.address, a.res]
     elif n.sons[0].kind == nkCall:
       let tmp = p.getTemp
-      r.res = "($1 = $2, $1[0][$1[1]])" % [tmp, a.res]
+      r.res = "($1 = $2, $1[0])[$1[1]]" % [tmp, a.res]
     else:
       internalError(n.info, "genDeref")
 
@@ -1351,8 +1374,7 @@ proc createRecordVarAux(p: PProc, rec: PNode, excludedFieldIDs: IntSet, output: 
     if rec.sym.id notin excludedFieldIDs:
       if output.len > 0: output.add(", ")
       if p.target == targetJS:
-        output.add(mangleName(rec.sym, p.target))
-        output.add(": ")
+        output.addf("$#: ", [mangleName(rec.sym, p.target)])
       else:
         output.addf("'$#' => ", [mangleName(rec.sym, p.target)])
       output.add(createVar(p, rec.sym.typ, false))
@@ -1364,6 +1386,7 @@ proc createObjInitList(p: PProc, typ: PType, excludedFieldIDs: IntSet, output: v
     if output.len > 0: output.add(", ")
     addf(output, "m_type: $1" | "'m_type' => $#", [genTypeInfo(p, t)])
   while t != nil:
+    t = t.skipTypes(skipPtrs)
     createRecordVarAux(p, t.n, excludedFieldIDs, output)
     t = t.sons[0]
 
@@ -1386,13 +1409,13 @@ proc createVar(p: PProc, typ: PType, indirect: bool): Rope =
     result = putToSeq("0", indirect)
   of tyFloat..tyFloat128:
     result = putToSeq("0.0", indirect)
-  of tyRange, tyGenericInst:
+  of tyRange, tyGenericInst, tyAlias:
     result = createVar(p, lastSon(typ), indirect)
   of tySet:
     result = putToSeq("{}" | "array()", indirect)
   of tyBool:
     result = putToSeq("false", indirect)
-  of tyArray, tyArrayConstr:
+  of tyArray:
     let length = int(lengthOrd(t))
     let e = elemType(t)
     let jsTyp = arrayTypeForElemType(e)
@@ -1471,13 +1494,21 @@ proc genVarInit(p: PProc, v: PSym, n: PNode) =
         useMagic(p, "nimCopy")
         s = "nimCopy(null, $1, $2)" % [a.res, genTypeInfo(p, n.typ)]
     of etyBaseIndex:
-      if (a.typ != etyBaseIndex): internalError(n.info, "genVarInit")
-      if {sfAddrTaken, sfGlobal} * v.flags != {}:
-        addf(p.body, "var $1 = [$2, $3];$n",
-            [v.loc.r, a.address, a.res])
+      let targetBaseIndex = {sfAddrTaken, sfGlobal} * v.flags == {}
+      if a.typ == etyBaseIndex:
+        if targetBaseIndex:
+          addf(p.body, "var $1 = $2, $1_Idx = $3;$n", [
+              v.loc.r, a.address, a.res])
+        else:
+          addf(p.body, "var $1 = [$2, $3];$n",
+              [v.loc.r, a.address, a.res])
       else:
-        addf(p.body, "var $1 = $2; var $1_Idx = $3;$n", [
-             v.loc.r, a.address, a.res])
+        if targetBaseIndex:
+          let tmp = p.getTemp
+          addf(p.body, "var $1 = $2, $3 = $1[0], $3_Idx = $1[1];$n",
+              [tmp, a.res, v.loc.r])
+        else:
+          addf(p.body, "var $1 = $2;$n", [v.loc.r, a.res])
       return
     else:
       s = a.res
@@ -1497,7 +1528,7 @@ proc genVarStmt(p: PProc, n: PNode) =
         assert(a.kind == nkIdentDefs)
         assert(a.sons[0].kind == nkSym)
         var v = a.sons[0].sym
-        if lfNoDecl notin v.loc.flags:
+        if lfNoDecl notin v.loc.flags and sfImportc notin v.flags:
           genLineDir(p, a)
           genVarInit(p, v, a.sons[2])
 
@@ -2163,7 +2194,7 @@ proc genHeader(target: TTarget): Rope =
   if target == targetJS:
     result = (
       "/* Generated by the Nim Compiler v$1 */$n" &
-      "/*   (c) 2016 Andreas Rumpf */$n$n" &
+      "/*   (c) 2017 Andreas Rumpf */$n$n" &
       "var framePtr = null;$n" &
       "var excHandler = 0;$n" &
       "var lastJSError = null;$n" &
@@ -2179,7 +2210,7 @@ proc genHeader(target: TTarget): Rope =
   else:
     result = ("<?php$n" &
               "/* Generated by the Nim Compiler v$1 */$n" &
-              "/*   (c) 2016 Andreas Rumpf */$n$n" &
+              "/*   (c) 2017 Andreas Rumpf */$n$n" &
               "$$framePtr = null;$n" &
               "$$excHandler = 0;$n" &
               "$$lastJSError = null;$n") %
@@ -2206,13 +2237,13 @@ proc myProcess(b: PPassContext, n: PNode): PNode =
   add(p.g.code, p.body)
   globals.unique = p.unique
 
-proc wholeCode*(m: BModule): Rope =
+proc wholeCode(graph: ModuleGraph; m: BModule): Rope =
   for prc in globals.forwarded:
     if not globals.generatedSyms.containsOrIncl(prc.id):
       var p = newProc(globals, m, nil, m.module.options)
       attachProc(p, prc)
 
-  var disp = generateMethodDispatchers()
+  var disp = generateMethodDispatchers(graph)
   for i in 0..sonsLen(disp)-1:
     let prc = disp.sons[i].sym
     if not globals.generatedSyms.containsOrIncl(prc.id):
@@ -2238,7 +2269,7 @@ proc genClass(obj: PType; content: Rope; ext: string) =
     else: nil
   let result = ("<?php$n" &
             "/* Generated by the Nim Compiler v$# */$n" &
-            "/*   (c) 2016 Andreas Rumpf */$n$n" &
+            "/*   (c) 2017 Andreas Rumpf */$n$n" &
             "require_once \"nimsystem.php\";$n" &
             "class $#$# {$n$#$n}$n") %
            [rope(VersionAsString), cls, extends, content]
@@ -2246,7 +2277,7 @@ proc genClass(obj: PType; content: Rope; ext: string) =
   let outfile = changeFileExt(completeCFilePath($cls), ext)
   discard writeRopeIfNotEqual(result, outfile)
 
-proc myClose(b: PPassContext, n: PNode): PNode =
+proc myClose(graph: ModuleGraph; b: PPassContext, n: PNode): PNode =
   if passes.skipCodegen(n): return n
   result = myProcess(b, n)
   var m = BModule(b)
@@ -2254,7 +2285,7 @@ proc myClose(b: PPassContext, n: PNode): PNode =
     let ext = if m.target == targetJS: "js" else: "php"
     let f = if globals.classes.len == 0: m.module.filename
             else: "nimsystem"
-    let code = wholeCode(m)
+    let code = wholeCode(graph, m)
     let outfile =
       if options.outFile.len > 0:
         if options.outFile.isAbsolute: options.outFile
@@ -2265,11 +2296,11 @@ proc myClose(b: PPassContext, n: PNode): PNode =
     for obj, content in items(globals.classes):
       genClass(obj, content, ext)
 
-proc myOpenCached(s: PSym, rd: PRodReader): PPassContext =
+proc myOpenCached(graph: ModuleGraph; s: PSym, rd: PRodReader): PPassContext =
   internalError("symbol files are not possible with the JS code generator")
   result = nil
 
-proc myOpen(s: PSym): PPassContext =
+proc myOpen(graph: ModuleGraph; s: PSym; cache: IdentCache): PPassContext =
   var r = newModule(s)
   r.target = if gCmd == cmdCompileToPHP: targetPHP else: targetJS
   result = r

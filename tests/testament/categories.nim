@@ -32,9 +32,10 @@ proc runRodFiles(r: var TResults, cat: Category, options: string) =
   # test basic recompilation scheme:
   test "hallo"
   test "hallo"
-  # test incremental type information:
-  test "hallo2"
-  delNimCache()
+  when false:
+    # test incremental type information:
+    test "hallo2"
+    delNimCache()
 
   # test type converters:
   test "aconv"
@@ -109,12 +110,20 @@ proc dllTests(r: var TResults, cat: Category, options: string) =
 
   runBasicDLLTest c, r, cat, options
   runBasicDLLTest c, r, cat, options & " -d:release"
-  runBasicDLLTest c, r, cat, options & " --gc:boehm"
-  runBasicDLLTest c, r, cat, options & " -d:release --gc:boehm"
+  when not defined(windows):
+    # still cannot find a recent Windows version of boehm.dll:
+    runBasicDLLTest c, r, cat, options & " --gc:boehm"
+    runBasicDLLTest c, r, cat, options & " -d:release --gc:boehm"
 
 # ------------------------------ GC tests -------------------------------------
 
 proc gcTests(r: var TResults, cat: Category, options: string) =
+  template testWithNone(filename: untyped) =
+    testSpec r, makeTest("tests/gc" / filename, options &
+                  " --gc:none", cat, actionRun)
+    testSpec r, makeTest("tests/gc" / filename, options &
+                  " -d:release --gc:none", cat, actionRun)
+
   template testWithoutMs(filename: untyped) =
     testSpec r, makeTest("tests/gc" / filename, options, cat, actionRun)
     testSpec r, makeTest("tests/gc" / filename, options &
@@ -138,12 +147,14 @@ proc gcTests(r: var TResults, cat: Category, options: string) =
       testSpec r, makeTest("tests/gc" / filename, options &
                     " -d:release --gc:boehm", cat, actionRun)
 
+  testWithoutBoehm "foreign_thr"
   test "gcemscripten"
   test "growobjcrash"
   test "gcbench"
   test "gcleak"
   test "gcleak2"
   test "gctest"
+  testWithNone "gctest"
   test "gcleak3"
   test "gcleak4"
   # Disabled because it works and takes too long to run:
@@ -192,6 +203,8 @@ proc threadTests(r: var TResults, cat: Category, options: string) =
   test "tthreadanalysis2"
   #test "tthreadanalysis3"
   test "tthreadheapviolation1"
+  test "tonthreadcreation"
+  test "tracy_allocator"
 
 # ------------------------- IO tests ------------------------------------------
 
@@ -201,6 +214,14 @@ proc ioTests(r: var TResults, cat: Category, options: string) =
   var c = initResults()
   testSpec c, makeTest("tests/system/helpers/readall_echo", options, cat)
   testSpec r, makeTest("tests/system/io", options, cat)
+
+# ------------------------- async tests ---------------------------------------
+proc asyncTests(r: var TResults, cat: Category, options: string) =
+  template test(filename: untyped) =
+    testSpec r, makeTest(filename, options, cat)
+    testSpec r, makeTest(filename, options & " -d:upcoming", cat)
+  for t in os.walkFiles("tests/async/t*.nim"):
+    test(t)
 
 # ------------------------- debugger tests ------------------------------------
 
@@ -228,8 +249,8 @@ proc jsTests(r: var TResults, cat: Category, options: string) =
                    "varres/tvartup", "misc/tints", "misc/tunsignedinc"]:
     test "tests/" & testfile & ".nim"
 
-  for testfile in ["pure/strutils", "pure/json", "pure/random", "pure/times"]:
-    test "lib/" & testfile & ".nim"
+  for testfile in ["strutils", "json", "random", "times", "logging"]:
+    test "lib/pure/" & testfile & ".nim"
 
 # ------------------------- manyloc -------------------------------------------
 #proc runSpecialTests(r: var TResults, options: string) =
@@ -253,6 +274,8 @@ proc findMainFile(dir: string): string =
 proc manyLoc(r: var TResults, cat: Category, options: string) =
   for kind, dir in os.walkDir("tests/manyloc"):
     if kind == pcDir:
+      when defined(windows):
+        if dir.endsWith"nake": continue
       let mainfile = findMainFile(dir)
       if mainfile != "":
         testNoSpec r, makeTest(mainfile, options, cat)
@@ -262,9 +285,9 @@ proc compileExample(r: var TResults, pattern, options: string, cat: Category) =
     testNoSpec r, makeTest(test, options, cat)
 
 proc testStdlib(r: var TResults, pattern, options: string, cat: Category) =
-  var disabledSet = disabledFiles.toSet()
   for test in os.walkFiles(pattern):
-    if test notin disabledSet:
+    let name = extractFilename(test)
+    if name notin disabledFiles:
       let contents = readFile(test).string
       if contents.contains("when isMainModule"):
         testSpec r, makeTest(test, options, cat, actionRunNoSpec)
@@ -368,7 +391,13 @@ proc `&?.`(a, b: string): string =
   # candidate for the stdlib?
   result = if a.endswith(b): a else: a & b
 
-proc processCategory(r: var TResults, cat: Category, options: string, fileGlob: string = "t*.nim") =
+proc processSingleTest(r: var TResults, cat: Category, options, test: string) =
+  let test = "tests" & DirSep &.? cat.string / test
+
+  if existsFile(test): testSpec r, makeTest(test, options, cat)
+  else: echo "[Warning] - ", test, " test does not exist"
+
+proc processCategory(r: var TResults, cat: Category, options: string) =
   case cat.string.normalize
   of "rodfiles":
     when false: compileRodFiles(r, cat, options)
@@ -390,6 +419,8 @@ proc processCategory(r: var TResults, cat: Category, options: string, fileGlob: 
     threadTests r, cat, options & " --threads:on"
   of "io":
     ioTests r, cat, options
+  of "async":
+    asyncTests r, cat, options
   of "lib":
     testStdlib(r, "lib/pure/*.nim", options, cat)
     testStdlib(r, "lib/packages/docutils/highlite", options, cat)
@@ -407,5 +438,5 @@ proc processCategory(r: var TResults, cat: Category, options: string, fileGlob: 
     # We can't test it because it depends on a third party.
     discard # TODO: Move untestable tests to someplace else, i.e. nimble repo.
   else:
-    for name in os.walkFiles("tests" & DirSep &.? cat.string / fileGlob):
+    for name in os.walkFiles("tests" & DirSep &.? cat.string / "t*.nim"):
       testSpec r, makeTest(name, options, cat)

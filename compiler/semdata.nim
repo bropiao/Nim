@@ -1,7 +1,7 @@
 #
 #
 #           The Nim Compiler
-#        (c) Copyright 2012 Andreas Rumpf
+#        (c) Copyright 2017 Andreas Rumpf
 #
 #    See the file "copying.txt", included in this
 #    distribution, for details about the copyright.
@@ -10,14 +10,14 @@
 ## This module contains the data structures for the semantic checking phase.
 
 import
-  strutils, lists, intsets, options, lexer, ast, astalgo, trees, treetab,
+  strutils, intsets, options, lexer, ast, astalgo, trees, treetab,
   wordrecg,
   ropes, msgs, platform, os, condsyms, idents, renderer, types, extccomp, math,
-  magicsys, nversion, nimsets, parser, times, passes, rodread, vmdef
+  magicsys, nversion, nimsets, parser, times, passes, rodread, vmdef,
+  modulegraphs
 
 type
-  TOptionEntry* = object of lists.TListEntry # entries to put on a
-                                             # stack for pragma parsing
+  TOptionEntry* = object      # entries to put on a stack for pragma parsing
     options*: TOptions
     defaultCC*: TCallingConvention
     dynlib*: PLib
@@ -38,6 +38,7 @@ type
     next*: PProcCon           # used for stacking procedure contexts
     wasForwarded*: bool       # whether the current proc has a separate header
     bracketExpr*: PNode       # current bracket expression (for ^ support)
+    mapping*: TIdTable
 
   TInstantiationPair* = object
     genericSym*: PSym
@@ -77,10 +78,10 @@ type
     inGenericInst*: int        # > 0 if we are instantiating a generic
     converters*: TSymSeq       # sequence of converters
     patterns*: TSymSeq         # sequence of pattern matchers
-    optionStack*: TLinkedList
+    optionStack*: seq[POptionEntry]
     symMapping*: TIdTable      # every gensym'ed symbol needs to be mapped
                                # to some new symbol in a generic instantiation
-    libs*: TLinkedList         # all libs used by this module
+    libs*: seq[PLib]           # all libs used by this module
     semConstExpr*: proc (c: PContext, n: PNode): PNode {.nimcall.} # for the pragmas
     semExpr*: proc (c: PContext, n: PNode, flags: TExprFlags = {}): PNode {.nimcall.}
     semTryExpr*: proc (c: PContext, n: PNode,flags: TExprFlags = {}): PNode {.nimcall.}
@@ -106,7 +107,12 @@ type
     instTypeBoundOp*: proc (c: PContext; dc: PSym; t: PType; info: TLineInfo;
                             op: TTypeAttachedOp; col: int): PSym {.nimcall.}
     selfName*: PIdent
+    cache*: IdentCache
+    graph*: ModuleGraph
     signatures*: TStrTable
+    recursiveDep*: string
+    suggestionsMade*: bool
+    inTypeContext*: int
 
 proc makeInstPair*(s: PSym, inst: PInstantiation): TInstantiationPair =
   result.genericSym = s
@@ -116,62 +122,72 @@ proc filename*(c: PContext): string =
   # the module's filename
   return c.module.filename
 
-proc newContext*(module: PSym): PContext
-
-proc lastOptionEntry*(c: PContext): POptionEntry
-proc newOptionEntry*(): POptionEntry
-proc newLib*(kind: TLibKind): PLib
-proc addToLib*(lib: PLib, sym: PSym)
-proc makePtrType*(c: PContext, baseType: PType): PType
-proc newTypeS*(kind: TTypeKind, c: PContext): PType
-proc fillTypeS*(dest: PType, kind: TTypeKind, c: PContext)
-
 proc scopeDepth*(c: PContext): int {.inline.} =
   result = if c.currentScope != nil: c.currentScope.depthLevel
            else: 0
 
-# owner handling:
-proc getCurrOwner*(): PSym
-proc pushOwner*(owner: PSym)
-proc popOwner*()
-# implementation
-
-var gOwners*: seq[PSym] = @[]
-
-proc getCurrOwner(): PSym =
+proc getCurrOwner*(c: PContext): PSym =
   # owner stack (used for initializing the
   # owner field of syms)
   # the documentation comment always gets
   # assigned to the current owner
-  # BUGFIX: global array is needed!
-  result = gOwners[high(gOwners)]
+  result = c.graph.owners[^1]
 
-proc pushOwner(owner: PSym) =
-  add(gOwners, owner)
+proc pushOwner*(c: PContext; owner: PSym) =
+  add(c.graph.owners, owner)
 
-proc popOwner() =
-  var length = len(gOwners)
-  if length > 0: setLen(gOwners, length - 1)
+proc popOwner*(c: PContext) =
+  var length = len(c.graph.owners)
+  if length > 0: setLen(c.graph.owners, length - 1)
   else: internalError("popOwner")
 
-proc lastOptionEntry(c: PContext): POptionEntry =
-  result = POptionEntry(c.optionStack.tail)
+proc lastOptionEntry*(c: PContext): POptionEntry =
+  result = c.optionStack[^1]
 
 proc popProcCon*(c: PContext) {.inline.} = c.p = c.p.next
 
-proc newOptionEntry(): POptionEntry =
+proc put*(p: PProcCon; key, val: PSym) =
+  if p.mapping.data == nil: initIdTable(p.mapping)
+  #echo "put into table ", key.info
+  p.mapping.idTablePut(key, val)
+
+proc get*(p: PProcCon; key: PSym): PSym =
+  if p.mapping.data == nil: return nil
+  result = PSym(p.mapping.idTableGet(key))
+
+proc getGenSym*(c: PContext; s: PSym): PSym =
+  if sfGenSym notin s.flags: return s
+  var it = c.p
+  while it != nil:
+    result = get(it, s)
+    if result != nil:
+      #echo "got from table ", result.name.s, " ", result.info
+      return result
+    it = it.next
+  result = s
+
+proc considerGenSyms*(c: PContext; n: PNode) =
+  if n.kind == nkSym:
+    let s = getGenSym(c, n.sym)
+    if n.sym != s:
+      n.sym = s
+  else:
+    for i in 0..<n.safeLen:
+      considerGenSyms(c, n.sons[i])
+
+proc newOptionEntry*(): POptionEntry =
   new(result)
   result.options = gOptions
   result.defaultCC = ccDefault
   result.dynlib = nil
   result.notes = gNotes
 
-proc newContext(module: PSym): PContext =
+proc newContext*(graph: ModuleGraph; module: PSym; cache: IdentCache): PContext =
   new(result)
   result.ambiguousSymbols = initIntSet()
-  initLinkedList(result.optionStack)
-  initLinkedList(result.libs)
-  append(result.optionStack, newOptionEntry())
+  result.optionStack = @[]
+  result.libs = @[]
+  result.optionStack.add(newOptionEntry())
   result.module = module
   result.friendModules = @[module]
   result.converters = @[]
@@ -180,6 +196,8 @@ proc newContext(module: PSym): PContext =
   initStrTable(result.userPragmas)
   result.generics = @[]
   result.unknownIdents = initIntSet()
+  result.cache = cache
+  result.graph = graph
   initStrTable(result.signatures)
 
 
@@ -196,16 +214,19 @@ proc addConverter*(c: PContext, conv: PSym) =
 proc addPattern*(c: PContext, p: PSym) =
   inclSym(c.patterns, p)
 
-proc newLib(kind: TLibKind): PLib =
+proc newLib*(kind: TLibKind): PLib =
   new(result)
   result.kind = kind          #initObjectSet(result.syms)
 
-proc addToLib(lib: PLib, sym: PSym) =
+proc addToLib*(lib: PLib, sym: PSym) =
   #if sym.annex != nil and not isGenericRoutine(sym):
   #  LocalError(sym.info, errInvalidPragma)
   sym.annex = lib
 
-proc makePtrType(c: PContext, baseType: PType): PType =
+proc newTypeS*(kind: TTypeKind, c: PContext): PType =
+  result = newType(kind, getCurrOwner(c))
+
+proc makePtrType*(c: PContext, baseType: PType): PType =
   result = newTypeS(tyPtr, c)
   addSonSkipIntLit(result, baseType.assertNotNil)
 
@@ -222,7 +243,7 @@ proc makeTypeDesc*(c: PContext, typ: PType): PType =
 
 proc makeTypeSymNode*(c: PContext, typ: PType, info: TLineInfo): PNode =
   let typedesc = makeTypeDesc(c, typ)
-  let sym = newSym(skType, idAnon, getCurrOwner(), info).linkTo(typedesc)
+  let sym = newSym(skType, c.cache.idAnon, getCurrOwner(c), info).linkTo(typedesc)
   return newSymNode(sym, info)
 
 proc makeTypeFromExpr*(c: PContext, n: PNode): PType =
@@ -232,7 +253,7 @@ proc makeTypeFromExpr*(c: PContext, n: PNode): PType =
 
 proc newTypeWithSons*(c: PContext, kind: TTypeKind,
                       sons: seq[PType]): PType =
-  result = newType(kind, getCurrOwner())
+  result = newType(kind, getCurrOwner(c))
   result.sons = sons
 
 proc makeStaticExpr*(c: PContext, n: PNode): PNode =
@@ -250,7 +271,16 @@ proc makeAndType*(c: PContext, t1, t2: PType): PType =
 
 proc makeOrType*(c: PContext, t1, t2: PType): PType =
   result = newTypeS(tyOr, c)
-  result.sons = @[t1, t2]
+  if t1.kind != tyOr and t2.kind != tyOr:
+    result.sons = @[t1, t2]
+  else:
+    template addOr(t1) =
+      if t1.kind == tyOr:
+        for x in t1.sons: result.rawAddSon x
+      else:
+        result.rawAddSon t1
+    addOr(t1)
+    addOr(t2)
   propagateToOwner(result, t1)
   propagateToOwner(result, t2)
   result.flags.incl((t1.flags + t2.flags) * {tfHasStatic})
@@ -284,9 +314,6 @@ template rangeHasStaticIf*(t: PType): bool =
 template getStaticTypeFromRange*(t: PType): PType =
   t.n[1][0][1].typ
 
-proc newTypeS(kind: TTypeKind, c: PContext): PType =
-  result = newType(kind, getCurrOwner())
-
 proc errorType*(c: PContext): PType =
   ## creates a type representing an error state
   result = newTypeS(tyError, c)
@@ -295,9 +322,9 @@ proc errorNode*(c: PContext, n: PNode): PNode =
   result = newNodeI(nkEmpty, n.info)
   result.typ = errorType(c)
 
-proc fillTypeS(dest: PType, kind: TTypeKind, c: PContext) =
+proc fillTypeS*(dest: PType, kind: TTypeKind, c: PContext) =
   dest.kind = kind
-  dest.owner = getCurrOwner()
+  dest.owner = getCurrOwner(c)
   dest.size = - 1
 
 proc makeRangeType*(c: PContext; first, last: BiggestInt;

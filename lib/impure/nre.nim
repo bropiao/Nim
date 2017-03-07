@@ -23,6 +23,15 @@ export options
 ##
 ## A regular expression library for Nim using PCRE to do the hard work.
 ##
+## **Note**: If you love ``sequtils.toSeq`` we have bad news for you. This
+## library doesn't work with it due to documented compiler limitations. As
+## a workaround, use this:
+##
+## .. code-block:: nim
+##
+##    import nre except toSeq
+##
+##
 ## Licencing
 ## ---------
 ##
@@ -431,8 +440,12 @@ proc initRegex(pattern: string, flags: int, study = true): Regex =
     raise SyntaxError(msg: $errorMsg, pos: errOffset, pattern: pattern)
 
   if study:
-    # XXX investigate JIT
-    result.pcreExtra = pcre.study(result.pcreObj, 0x0, addr errorMsg)
+    var options: cint = 0
+    var hasJit: cint
+    if pcre.config(pcre.CONFIG_JIT, addr hasJit) == 0:
+      if hasJit == 1'i32:
+        options = pcre.STUDY_JIT_COMPILE
+    result.pcreExtra = pcre.study(result.pcreObj, options, addr errorMsg)
     if errorMsg != nil:
       raise StudyError(msg: $errorMsg)
 
@@ -503,23 +516,23 @@ iterator findIter*(str: string, pattern: Regex, start = 0, endpos = int.high): R
   let unicode = uint32(getinfo[culong](pattern, pcre.INFO_OPTIONS) and
     pcre.UTF8) > 0u32
   let strlen = if endpos == int.high: str.len else: endpos+1
-
   var offset = start
   var match: Option[RegexMatch]
+  var neverMatched = true
+
   while true:
     var flags = 0
-
     if match.isSome and
        match.get.matchBounds.a > match.get.matchBounds.b:
       # 0-len match
       flags = pcre.NOTEMPTY_ATSTART
-
     match = str.matchImpl(pattern, offset, endpos, flags)
 
     if match.isNone:
       # either the end of the input or the string
-      # cannot be split here
-      if offset >= strlen:
+      # cannot be split here - we also need to bail
+      # if we've never matched and we've already tried to...
+      if offset >= strlen or neverMatched:
         break
 
       if matchesCrLf and offset < (str.len - 1) and
@@ -533,10 +546,10 @@ iterator findIter*(str: string, pattern: Regex, start = 0, endpos = int.high): R
       else:
         offset += 1
     else:
+      neverMatched = false
       offset = match.get.matchBounds.b + 1
 
       yield match.get
-
 
 proc find*(str: string, pattern: Regex, start = 0, endpos = int.high): Option[RegexMatch] =
   ## Finds the given pattern in the string between the end and start

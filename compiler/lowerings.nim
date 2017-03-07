@@ -114,6 +114,12 @@ proc createObj*(owner: PSym, info: TLineInfo): PType =
   rawAddSon(result, nil)
   incl result.flags, tfFinal
   result.n = newNodeI(nkRecList, info)
+  when true:
+    let s = newSym(skType, getIdent("Env_" & info.toFilename & "_" & $info.line),
+                   owner, info)
+    incl s.flags, sfAnon
+    s.typ = result
+    result.sym = s
 
 proc rawAddField*(obj: PType; field: PSym) =
   assert field.kind == skField
@@ -172,7 +178,7 @@ proc indirectAccess*(a: PNode, b: string, info: TLineInfo): PNode =
     if field != nil: break
     t = t.sons[0]
     if t == nil: break
-    t = t.skipTypes(abstractInst)
+    t = t.skipTypes(skipPtrs)
   #if field == nil:
   #  echo "FIELD ", b
   #  debug deref.typ
@@ -193,7 +199,7 @@ proc getFieldFromObj*(t: PType; v: PSym): PSym =
     if result != nil: break
     t = t.sons[0]
     if t == nil: break
-    t = t.skipTypes(abstractInst)
+    t = t.skipTypes(skipPtrs)
 
 proc indirectAccess*(a: PNode, b: PSym, info: TLineInfo): PNode =
   # returns a[].b as a node
@@ -284,7 +290,7 @@ proc addLocalVar(varSection, varInit: PNode; owner: PSym; typ: PType;
       varInit.add newFastAsgnStmt(newSymNode(result), v)
     else:
       let deepCopyCall = newNodeI(nkCall, varInit.info, 3)
-      deepCopyCall.sons[0] = newSymNode(createMagic("deepCopy", mDeepCopy))
+      deepCopyCall.sons[0] = newSymNode(getSysMagic("deepCopy", mDeepCopy))
       deepCopyCall.sons[1] = newSymNode(result)
       deepCopyCall.sons[2] = v
       varInit.add deepCopyCall
@@ -356,7 +362,7 @@ proc createWrapperProc(f: PNode; threadParam, argsParam: PSym;
       if fk == fvGC: "data" else: "blob", fv.info), call)
     if fk == fvGC:
       let incRefCall = newNodeI(nkCall, fv.info, 2)
-      incRefCall.sons[0] = newSymNode(createMagic("GCref", mGCref))
+      incRefCall.sons[0] = newSymNode(getSysMagic("GCref", mGCref))
       incRefCall.sons[1] = indirectAccess(threadLocalProm.newSymNode,
                                           "data", fv.info)
       body.add incRefCall
@@ -441,12 +447,12 @@ proc newIntLit*(value: BiggestInt): PNode =
   result.typ = getSysType(tyInt)
 
 proc genHigh*(n: PNode): PNode =
-  if skipTypes(n.typ, abstractVar).kind in {tyArrayConstr, tyArray}:
+  if skipTypes(n.typ, abstractVar).kind == tyArray:
     result = newIntLit(lastOrd(skipTypes(n.typ, abstractVar)))
   else:
     result = newNodeI(nkCall, n.info, 2)
     result.typ = getSysType(tyInt)
-    result.sons[0] = newSymNode(createMagic("high", mHigh))
+    result.sons[0] = newSymNode(getSysMagic("high", mHigh))
     result.sons[1] = n
 
 proc setupArgsForParallelism(n: PNode; objType: PType; scratchObj: PSym;

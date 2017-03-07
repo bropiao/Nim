@@ -386,7 +386,9 @@ proc debugTree(n: PNode, indent: int, maxRecDepth: int;
     var istr = rspaces(indent + 2)
     result = "{$N$1\"kind\": $2" %
              [istr, makeYamlString($n.kind)]
+    addf(result, ",$N$1\"info\": $2", [istr, lineInfoToStr(n.info)])
     if maxRecDepth != 0:
+      addf(result, ",$N$1\"flags\": $2", [istr, rope($n.flags)])
       case n.kind
       of nkCharLit..nkUInt64Lit:
         addf(result, ",$N$1\"intVal\": $2", [istr, rope(n.intVal)])
@@ -418,7 +420,6 @@ proc debugTree(n: PNode, indent: int, maxRecDepth: int;
             addf(result, "$N$1$2", [rspaces(indent + 4), debugTree(n.sons[i],
                 indent + 4, maxRecDepth - 1, renderType)])
           addf(result, "$N$1]", [istr])
-    addf(result, ",$N$1\"info\": $2", [istr, lineInfoToStr(n.info)])
     addf(result, "$N$1}", [rspaces(indent)])
 
 proc debug(n: PSym) =

@@ -26,7 +26,8 @@ elif defined(posix):
 else:
   {.error: "OS module not ported to your operating system!".}
 
-include ospaths
+import ospaths
+export ospaths
 
 when defined(posix):
   when NoFakeVars:
@@ -50,6 +51,8 @@ proc c_getenv(env: cstring): cstring {.
   importc: "getenv", header: "<stdlib.h>".}
 proc c_putenv(env: cstring): cint {.
   importc: "putenv", header: "<stdlib.h>".}
+proc c_free(p: pointer) {.
+  importc: "free", header: "<stdlib.h>".}
 
 var errno {.importc, header: "<errno.h>".}: cint
 
@@ -303,24 +306,47 @@ proc fileNewer*(a, b: string): bool {.rtl, extern: "nos$1".} =
 
 proc getCurrentDir*(): string {.rtl, extern: "nos$1", tags: [].} =
   ## Returns the `current working directory`:idx:.
-  const bufsize = 512 # should be enough
   when defined(windows):
+    var bufsize = MAX_PATH.int32
     when useWinUnicode:
       var res = newWideCString("", bufsize)
-      var L = getCurrentDirectoryW(bufsize, res)
-      if L == 0'i32: raiseOSError(osLastError())
-      result = res$L
+      while true:
+        var L = getCurrentDirectoryW(bufsize, res)
+        if L == 0'i32:
+          raiseOSError(osLastError())
+        elif L > bufsize:
+          res = newWideCString("", L)
+          bufsize = L
+        else:
+          result = res$L
+          break
     else:
       result = newString(bufsize)
-      var L = getCurrentDirectoryA(bufsize, result)
-      if L == 0'i32: raiseOSError(osLastError())
-      setLen(result, L)
+      while true:
+        var L = getCurrentDirectoryA(bufsize, result)
+        if L == 0'i32:
+          raiseOSError(osLastError())
+        elif L > bufsize:
+          result = newString(L)
+          bufsize = L
+        else:
+          setLen(result, L)
+          break
   else:
+    var bufsize = 1024 # should be enough
     result = newString(bufsize)
-    if getcwd(result, bufsize) != nil:
-      setLen(result, c_strlen(result))
-    else:
-      raiseOSError(osLastError())
+    while true:
+      if getcwd(result, bufsize) != nil:
+        setLen(result, c_strlen(result))
+        break
+      else:
+        let err = osLastError()
+        if err.int32 == ERANGE:
+          bufsize = bufsize shl 1
+          doAssert(bufsize >= 0)
+          result = newString(bufsize)
+        else:
+          raiseOSError(osLastError())
 
 proc setCurrentDir*(newDir: string) {.inline, tags: [].} =
   ## Sets the `current working directory`:idx:; `OSError` is raised if
@@ -336,28 +362,45 @@ proc setCurrentDir*(newDir: string) {.inline, tags: [].} =
 
 proc expandFilename*(filename: string): string {.rtl, extern: "nos$1",
   tags: [ReadDirEffect].} =
-  ## Returns the full (`absolute`:idx:) path of the file `filename`, raises OSError in case of an error.
+  ## Returns the full (`absolute`:idx:) path of the file `filename`,
+  ## raises OSError in case of an error.
   when defined(windows):
-    const bufsize = 3072'i32
+    var bufsize = MAX_PATH.int32
     when useWinUnicode:
-      var unused: WideCString
-      var res = newWideCString("", bufsize div 2)
-      var L = getFullPathNameW(newWideCString(filename), bufsize, res, unused)
-      if L <= 0'i32 or L >= bufsize:
-        raiseOSError(osLastError())
-      result = res$L
+      var unused: WideCString = nil
+      var res = newWideCString("", bufsize)
+      while true:
+        var L = getFullPathNameW(newWideCString(filename), bufsize, res, unused)
+        if L == 0'i32:
+          raiseOSError(osLastError())
+        elif L > bufsize:
+          res = newWideCString("", L)
+          bufsize = L
+        else:
+          result = res$L
+          break
     else:
-      var unused: cstring
+      var unused: cstring = nil
       result = newString(bufsize)
-      var L = getFullPathNameA(filename, bufsize, result, unused)
-      if L <= 0'i32 or L >= bufsize: raiseOSError(osLastError())
-      setLen(result, L)
+      while true:
+        var L = getFullPathNameA(filename, bufsize, result, unused)
+        if L == 0'i32:
+          raiseOSError(osLastError())
+        elif L > bufsize:
+          result = newString(L)
+          bufsize = L
+        else:
+          setLen(result, L)
+          break
   else:
-    # careful, realpath needs to take an allocated buffer according to Posix:
-    result = newString(pathMax)
-    var r = realpath(filename, result)
-    if r.isNil: raiseOSError(osLastError())
-    setLen(result, c_strlen(result))
+    # according to Posix we don't need to allocate space for result pathname.
+    # But we need to free return value with free(3).
+    var r = realpath(filename, nil)
+    if r.isNil:
+      raiseOSError(osLastError())
+    else:
+      result = $r
+      c_free(cast[pointer](r))
 
 when defined(Windows):
   proc openHandle(path: string, followSymlink=true): Handle =
@@ -571,6 +614,7 @@ proc copyFile*(source, dest: string) {.rtl, extern: "nos$1",
       if bytesread != bufSize: break
     dealloc(buf)
     close(s)
+    flushFile(d)
     close(d)
 
 proc moveFile*(source, dest: string) {.rtl, extern: "nos$1",
@@ -580,9 +624,9 @@ proc moveFile*(source, dest: string) {.rtl, extern: "nos$1",
     when useWinUnicode:
       let s = newWideCString(source)
       let d = newWideCString(dest)
-      if moveFileW(s, d, 0'i32) == 0'i32: raiseOSError(osLastError())
+      if moveFileW(s, d) == 0'i32: raiseOSError(osLastError())
     else:
-      if moveFileA(source, dest, 0'i32) == 0'i32: raiseOSError(osLastError())
+      if moveFileA(source, dest) == 0'i32: raiseOSError(osLastError())
   else:
     if c_rename(source, dest) != 0'i32:
       raiseOSError(osLastError(), $strerror(errno))
@@ -595,12 +639,12 @@ when not declared(ENOENT) and not defined(Windows):
 
 when defined(Windows):
   when useWinUnicode:
-    template deleteFile(file: expr): expr {.immediate.} = deleteFileW(file)
-    template setFileAttributes(file, attrs: expr): expr {.immediate.} =
+    template deleteFile(file: untyped): untyped  = deleteFileW(file)
+    template setFileAttributes(file, attrs: untyped): untyped =
       setFileAttributesW(file, attrs)
   else:
-    template deleteFile(file: expr): expr {.immediate.} = deleteFileA(file)
-    template setFileAttributes(file, attrs: expr): expr {.immediate.} =
+    template deleteFile(file: untyped): untyped = deleteFileA(file)
+    template setFileAttributes(file, attrs: untyped): untyped =
       setFileAttributesA(file, attrs)
 
 proc removeFile*(file: string) {.rtl, extern: "nos$1", tags: [WriteDirEffect].} =
@@ -805,12 +849,12 @@ template walkCommon(pattern: string, filter) =
     res = findFirstFile(pattern, f)
     if res != -1:
       defer: findClose(res)
+      let dotPos = searchExtPos(pattern)
       while true:
         if not skipFindData(f) and filter(f):
           # Windows bug/gotcha: 't*.nim' matches 'tfoo.nims' -.- so we check
           # that the file extensions have the same length ...
           let ff = getFilename(f)
-          let dotPos = searchExtPos(pattern)
           let idx = ff.len - pattern.len + dotPos
           if dotPos < 0 or idx >= ff.len or ff[idx] == '.' or
               pattern[dotPos+1] == '*':
@@ -864,6 +908,20 @@ type
     pcLinkToDir           ## path refers to a symbolic link to a directory
 
 {.deprecated: [TPathComponent: PathComponent].}
+
+
+when defined(posix):
+  proc getSymlinkFileKind(path: string): PathComponent =
+    # Helper function.
+    var s: Stat
+    assert(path != "")
+    if stat(path, s) < 0'i32:
+      raiseOSError(osLastError())
+    if S_ISDIR(s.st_mode):
+      result = pcLinkToDir
+    else:
+      result = pcLinkToFile
+
 
 proc staticWalkDir(dir: string; relative: bool): seq[
                   tuple[kind: PathComponent, path: string]] =
@@ -931,19 +989,21 @@ iterator walkDir*(dir: string; relative=false): tuple[kind: PathComponent, path:
                 if x.d_type == DT_DIR: k = pcDir
                 if x.d_type == DT_LNK:
                   if dirExists(y): k = pcLinkToDir
-                  else: k = succ(k)
+                  else: k = pcLinkToFile
                 yield (k, y)
                 continue
 
             if lstat(y, s) < 0'i32: break
-            if S_ISDIR(s.st_mode): k = pcDir
-            if S_ISLNK(s.st_mode): k = succ(k)
+            if S_ISDIR(s.st_mode):
+              k = pcDir
+            elif S_ISLNK(s.st_mode):
+              k = getSymlinkFileKind(y)
             yield (k, y)
 
 iterator walkDirRec*(dir: string, filter={pcFile, pcDir}): string {.
   tags: [ReadDirEffect].} =
-  ## walks over the directory `dir` and yields for each file in `dir`. The
-  ## full path for each file is returned.
+  ## Recursively walks over the directory `dir` and yields for each file in `dir`.
+  ## The full path for each file is returned. Directories are not returned.
   ## **Warning**:
   ## Modifying the directory structure while the iterator
   ## is traversing may result in undefined behavior!
@@ -993,38 +1053,76 @@ proc removeDir*(dir: string) {.rtl, extern: "nos$1", tags: [
     of pcDir: removeDir(path)
   rawRemoveDir(dir)
 
-proc rawCreateDir(dir: string) =
+proc rawCreateDir(dir: string): bool =
+  # Try to create one directory (not the whole path).
+  # returns `true` for success, `false` if the path has previously existed
+  #
+  # This is a thin wrapper over mkDir (or alternatives on other systems),
+  # so in case of a pre-existing path we don't check that it is a directory.
   when defined(solaris):
-    if mkdir(dir, 0o777) != 0'i32 and errno != EEXIST and errno != ENOSYS:
+    let res = mkdir(dir, 0o777)
+    if res == 0'i32:
+      result = true
+    elif errno in {EEXIST, ENOSYS}:
+      result = false
+    else:
       raiseOSError(osLastError())
   elif defined(unix):
-    if mkdir(dir, 0o777) != 0'i32 and errno != EEXIST:
+    let res = mkdir(dir, 0o777)
+    if res == 0'i32:
+      result = true
+    elif errno == EEXIST:
+      result = false
+    else:
+      echo res
       raiseOSError(osLastError())
   else:
     when useWinUnicode:
       wrapUnary(res, createDirectoryW, dir)
     else:
-      var res = createDirectoryA(dir)
-    if res == 0'i32 and getLastError() != 183'i32:
+      let res = createDirectoryA(dir)
+
+    if res != 0'i32:
+      result = true
+    elif getLastError() == 183'i32:
+      result = false
+    else:
       raiseOSError(osLastError())
 
-proc createDir*(dir: string) {.rtl, extern: "nos$1", tags: [WriteDirEffect].} =
+proc existsOrCreateDir*(dir: string): bool =
+  ## Check if a `directory`:idx: `dir` exists, and create it otherwise.
+  ##
+  ## Does not create parent directories (fails if parent does not exist).
+  ## Returns `true` if the directory already exists, and `false`
+  ## otherwise.
+  result = not rawCreateDir(dir)
+  if result:
+    # path already exists - need to check that it is indeed a directory
+    if not existsDir(dir):
+      raise newException(IOError, "Failed to create the directory")
+
+proc createDir*(dir: string) {.rtl, extern: "nos$1",
+  tags: [WriteDirEffect, ReadDirEffect].} =
   ## Creates the `directory`:idx: `dir`.
   ##
   ## The directory may contain several subdirectories that do not exist yet.
   ## The full path is created. If this fails, `OSError` is raised. It does **not**
-  ## fail if the path already exists because for most usages this does not
+  ## fail if the directory already exists because for most usages this does not
   ## indicate an error.
   var omitNext = false
-  when doslike:
+  when doslikeFileSystem:
     omitNext = isAbsolute(dir)
   for i in 1.. dir.len-1:
     if dir[i] in {DirSep, AltSep}:
       if omitNext:
         omitNext = false
       else:
-        rawCreateDir(substr(dir, 0, i-1))
-  rawCreateDir(dir)
+        discard existsOrCreateDir(substr(dir, 0, i-1))
+
+  # The loop does not create the dir itself if it doesn't end in separator
+  if dir.len > 0 and not omitNext and
+     dir[^1] notin {DirSep, AltSep}:
+    discard existsOrCreateDir(dir)
 
 proc copyDir*(source, dest: string) {.rtl, extern: "nos$1",
   tags: [WriteIOEffect, ReadIOEffect], benign.} =
@@ -1047,7 +1145,7 @@ proc copyDir*(source, dest: string) {.rtl, extern: "nos$1",
 
 proc createSymlink*(src, dest: string) =
   ## Create a symbolic link at `dest` which points to the item specified
-  ## by `src`. On most operating systems, will fail if a lonk
+  ## by `src`. On most operating systems, will fail if a link already exists.
   ##
   ## **Warning**:
   ## Some OS's (such as Microsoft Windows) restrict the creation
@@ -1070,8 +1168,8 @@ proc createHardlink*(src, dest: string) =
   ## Create a hard link at `dest` which points to the item specified
   ## by `src`.
   ##
-  ## **Warning**: Most OS's restrict the creation of hard links to
-  ## root users (administrators) .
+  ## **Warning**: Some OS's restrict the creation of hard links to
+  ## root users (administrators).
   when defined(Windows):
     when useWinUnicode:
       var wSrc = newWideCString(src)
@@ -1087,7 +1185,7 @@ proc createHardlink*(src, dest: string) =
 
 proc parseCmdLine*(c: string): seq[string] {.
   noSideEffect, rtl, extern: "nos$1".} =
-  ## Splits a command line into several components;
+  ## Splits a `command line`:idx: into several components;
   ## This proc is only occasionally useful, better use the `parseopt` module.
   ##
   ## On Windows, it uses the following parsing rules
@@ -1330,7 +1428,7 @@ elif defined(windows):
     if isNil(ownArgv): ownArgv = parseCmdLine($getCommandLine())
     return TaintedString(ownArgv[i])
 
-elif not defined(createNimRtl):
+elif not defined(createNimRtl) and not(defined(posix) and appType == "lib"):
   # On Posix, there is no portable way to get the command line from a DLL.
   var
     cmdCount {.importc: "cmdCount".}: cint
@@ -1365,6 +1463,35 @@ when declared(paramCount) or defined(nimdoc):
     result = @[]
     for i in 1..paramCount():
       result.add(paramStr(i))
+
+when defined(freebsd):
+  proc sysctl(name: ptr cint, namelen: cuint, oldp: pointer, oldplen: ptr csize,
+              newp: pointer, newplen: csize): cint
+       {.importc: "sysctl",header: """#include <sys/types.h>
+                                      #include <sys/sysctl.h>"""}
+  const
+    CTL_KERN = 1
+    KERN_PROC = 14
+    KERN_PROC_PATHNAME = 12
+    MAX_PATH = 1024
+
+  proc getApplFreebsd(): string =
+    var pathLength = csize(MAX_PATH)
+    result = newString(pathLength)
+    var req = [CTL_KERN.cint, KERN_PROC.cint, KERN_PROC_PATHNAME.cint, -1.cint]
+    while true:
+      let res = sysctl(addr req[0], 4, cast[pointer](addr result[0]),
+                       addr pathLength, nil, 0)
+      if res < 0:
+        let err = osLastError()
+        if err.int32 == ENOMEM:
+          result = newString(pathLength)
+        else:
+          result.setLen(0) # error!
+          break
+      else:
+        result.setLen(pathLength)
+        break
 
 when defined(linux) or defined(solaris) or defined(bsd) or defined(aix):
   proc getApplAux(procPath: string): string =
@@ -1410,16 +1537,34 @@ proc getAppFilename*(): string {.rtl, extern: "nos$1", tags: [ReadIOEffect].} =
   # Solaris:
   # /proc/<pid>/object/a.out (filename only)
   # /proc/<pid>/path/a.out (complete pathname)
-  # FreeBSD: /proc/<pid>/file
   when defined(windows):
+    var bufsize = int32(MAX_PATH)
     when useWinUnicode:
-      var buf = newWideCString("", 256)
-      var len = getModuleFileNameW(0, buf, 256)
-      result = buf$len
+      var buf = newWideCString("", bufsize)
+      while true:
+        var L = getModuleFileNameW(0, buf, bufsize)
+        if L == 0'i32:
+          result = "" # error!
+          break
+        elif L > bufsize:
+          buf = newWideCString("", L)
+          bufsize = L
+        else:
+          result = buf$L
+          break
     else:
-      result = newString(256)
-      var len = getModuleFileNameA(0, result, 256)
-      setlen(result, int(len))
+      result = newString(bufsize)
+      while true:
+        var L = getModuleFileNameA(0, result, bufsize)
+        if L == 0'i32:
+          result = "" # error!
+          break
+        elif L > bufsize:
+          result = newString(L)
+          bufsize = L
+        else:
+          setLen(result, L)
+          break
   elif defined(macosx):
     var size: cuint32
     getExecPath1(nil, size)
@@ -1434,7 +1579,7 @@ proc getAppFilename*(): string {.rtl, extern: "nos$1", tags: [ReadIOEffect].} =
     elif defined(solaris):
       result = getApplAux("/proc/" & $getpid() & "/path/a.out")
     elif defined(freebsd):
-      result = getApplAux("/proc/" & $getpid() & "/file")
+      result = getApplFreebsd()
     # little heuristic that may work on other POSIX-like systems:
     if result.len == 0:
       result = getApplHeuristic()
@@ -1502,7 +1647,7 @@ type
     lastWriteTime*: Time # Time file was last modified/written to.
     creationTime*: Time # Time file was created. Not supported on all systems!
 
-template rawToFormalFileInfo(rawInfo, formalInfo): untyped =
+template rawToFormalFileInfo(rawInfo, path, formalInfo): untyped =
   ## Transforms the native file info structure into the one nim uses.
   ## 'rawInfo' is either a 'TBY_HANDLE_FILE_INFORMATION' structure on Windows,
   ## or a 'Stat' structure on posix
@@ -1557,8 +1702,11 @@ template rawToFormalFileInfo(rawInfo, formalInfo): untyped =
     checkAndIncludeMode(S_IXOTH, fpOthersExec)
 
     formalInfo.kind = pcFile
-    if S_ISDIR(rawInfo.st_mode): formalInfo.kind = pcDir
-    if S_ISLNK(rawInfo.st_mode): formalInfo.kind.inc()
+    if S_ISDIR(rawInfo.st_mode):
+      formalInfo.kind = pcDir
+    elif S_ISLNK(rawInfo.st_mode):
+      assert(path != "") # symlinks can't occur for file handles
+      formalInfo.kind = getSymlinkFileKind(path)
 
 proc getFileInfo*(handle: FileHandle): FileInfo =
   ## Retrieves file information for the file object represented by the given
@@ -1574,12 +1722,12 @@ proc getFileInfo*(handle: FileHandle): FileInfo =
     var realHandle = get_osfhandle(handle)
     if getFileInformationByHandle(realHandle, addr rawInfo) == 0:
       raiseOSError(osLastError())
-    rawToFormalFileInfo(rawInfo, result)
+    rawToFormalFileInfo(rawInfo, "", result)
   else:
     var rawInfo: Stat
     if fstat(handle, rawInfo) < 0'i32:
       raiseOSError(osLastError())
-    rawToFormalFileInfo(rawInfo, result)
+    rawToFormalFileInfo(rawInfo, "", result)
 
 proc getFileInfo*(file: File): FileInfo =
   if file.isNil:
@@ -1608,7 +1756,7 @@ proc getFileInfo*(path: string, followSymlink = true): FileInfo =
       raiseOSError(osLastError())
     if getFileInformationByHandle(handle, addr rawInfo) == 0:
       raiseOSError(osLastError())
-    rawToFormalFileInfo(rawInfo, result)
+    rawToFormalFileInfo(rawInfo, path, result)
     discard closeHandle(handle)
   else:
     var rawInfo: Stat
@@ -1618,7 +1766,7 @@ proc getFileInfo*(path: string, followSymlink = true): FileInfo =
     else:
       if lstat(path, rawInfo) < 0'i32:
         raiseOSError(osLastError())
-    rawToFormalFileInfo(rawInfo, result)
+    rawToFormalFileInfo(rawInfo, path, result)
 
 proc isHidden*(path: string): bool =
   ## Determines whether a given path is hidden or not. Returns false if the

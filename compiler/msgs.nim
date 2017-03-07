@@ -12,7 +12,7 @@ import
 
 type
   TMsgKind* = enum
-    errUnknown, errIllFormedAstX, errInternal, errCannotOpenFile, errGenerated,
+    errUnknown, errInternal, errIllFormedAstX, errCannotOpenFile, errGenerated,
     errXCompilerDoesNotSupportCpp, errStringLiteralExpected,
     errIntLiteralExpected, errInvalidCharacterConstant,
     errClosingTripleQuoteExpected, errClosingQuoteExpected,
@@ -35,7 +35,7 @@ type
     errNoneSpeedOrSizeExpectedButXFound, errGuiConsoleOrLibExpectedButXFound,
     errUnknownOS, errUnknownCPU, errGenOutExpectedButXFound,
     errArgsNeedRunOption, errInvalidMultipleAsgn, errColonOrEqualsExpected,
-    errExprExpected, errUndeclaredIdentifier, errUndeclaredField,
+    errExprExpected, errUndeclaredField,
     errUndeclaredRoutine, errUseQualifier,
     errTypeExpected,
     errSystemNeeds, errExecutionOfProgramFailed, errNotOverloadable,
@@ -48,7 +48,7 @@ type
     errIndexOutOfBounds, errIndexTypesDoNotMatch, errBracketsInvalidForType,
     errValueOutOfSetBounds, errFieldInitTwice, errFieldNotInit,
     errExprXCannotBeCalled, errExprHasNoType, errExprXHasNoType,
-    errCastNotInSafeMode, errExprCannotBeCastedToX, errCommaOrParRiExpected,
+    errCastNotInSafeMode, errExprCannotBeCastToX, errCommaOrParRiExpected,
     errCurlyLeOrParLeExpected, errSectionExpected, errRangeExpected,
     errMagicOnlyInSystem, errPowerOfTwoExpected,
     errStringMayNotBeEmpty, errCallConvExpected, errProcOnlyOneCallConv,
@@ -108,8 +108,6 @@ type
     errCannotInferReturnType,
     errGenericLambdaNotAllowed,
     errCompilerDoesntSupportTarget,
-    errExternalAssemblerNotFound,
-    errExternalAssemblerNotValid,
     errUser,
     warnCannotOpenFile,
     warnOctalEscape, warnXIsNeverRead, warnXmightNotBeenInit,
@@ -135,8 +133,8 @@ type
 const
   MsgKindToStr*: array[TMsgKind, string] = [
     errUnknown: "unknown error",
-    errIllFormedAstX: "illformed AST: $1",
     errInternal: "internal error: $1",
+    errIllFormedAstX: "illformed AST: $1",
     errCannotOpenFile: "cannot open \'$1\'",
     errGenerated: "$1",
     errXCompilerDoesNotSupportCpp: "\'$1\' compiler does not support C++",
@@ -197,7 +195,6 @@ const
     errInvalidMultipleAsgn: "multiple assignment is not allowed",
     errColonOrEqualsExpected: "\':\' or \'=\' expected, but found \'$1\'",
     errExprExpected: "expression expected, but found \'$1\'",
-    errUndeclaredIdentifier: "undeclared identifier: \'$1\'",
     errUndeclaredField: "undeclared field: \'$1\'",
     errUndeclaredRoutine: "attempting to call undeclared routine: \'$1\'",
     errUseQualifier: "ambiguous identifier: \'$1\' -- use a qualifier",
@@ -215,7 +212,7 @@ const
     errOrdinalTypeExpected: "ordinal type expected",
     errOrdinalOrFloatTypeExpected: "ordinal or float type expected",
     errOverOrUnderflow: "over- or underflow",
-    errCannotEvalXBecauseIncompletelyDefined: "cannot evalutate '$1' because type is not defined completely",
+    errCannotEvalXBecauseIncompletelyDefined: "cannot evaluate '$1' because type is not defined completely",
     errChrExpectsRange0_255: "\'chr\' expects an int in the range 0..255",
     errDynlibRequiresExportc: "\'dynlib\' requires \'exportc\'",
     errUndeclaredFieldX: "undeclared field: \'$1\'",
@@ -230,7 +227,7 @@ const
     errExprHasNoType: "expression has no type",
     errExprXHasNoType: "expression \'$1\' has no type (or is ambiguous)",
     errCastNotInSafeMode: "\'cast\' not allowed in safe mode",
-    errExprCannotBeCastedToX: "expression cannot be casted to $1",
+    errExprCannotBeCastToX: "expression cannot be cast to $1",
     errCommaOrParRiExpected: "',' or ')' expected",
     errCurlyLeOrParLeExpected: "\'{\' or \'(\' expected",
     errSectionExpected: "section (\'type\', \'proc\', etc.) expected",
@@ -373,8 +370,6 @@ const
                                 "it is used as an operand to another routine and the types " &
                                 "of the generic paramers can be inferred from the expected signature.",
     errCompilerDoesntSupportTarget: "The current compiler \'$1\' doesn't support the requested compilation target",
-    errExternalAssemblerNotFound: "External assembler not found",
-    errExternalAssemblerNotValid: "External assembler '$1' is not a valid assembler",
     errUser: "$1",
     warnCannotOpenFile: "cannot open \'$1\'",
     warnOctalEscape: "octal escape sequences do not exist; leading zero is ignored",
@@ -521,7 +516,7 @@ const
                                          hintCodeBegin, hintCodeEnd,
                                          hintSource, hintStackTrace,
                                          hintGCStats},
-    {low(TNoteKind)..high(TNoteKind)} - {hintStackTrace},
+    {low(TNoteKind)..high(TNoteKind)} - {hintStackTrace, warnUninit},
     {low(TNoteKind)..high(TNoteKind)}]
 
 const
@@ -537,7 +532,7 @@ var
 proc toCChar*(c: char): string =
   case c
   of '\0'..'\x1F', '\x80'..'\xFF': result = '\\' & toOctal(c)
-  of '\'', '\"', '\\': result = '\\' & c
+  of '\'', '\"', '\\', '?': result = '\\' & c
   else: result = $(c)
 
 proc makeCString*(s: string): Rope =
@@ -567,6 +562,15 @@ proc newFileInfo(fullPath, projPath: string): TFileInfo =
   result.quotedFullName = fullPath.makeCString
   if optEmbedOrigSrc in gGlobalOptions or true:
     result.lines = @[]
+
+proc fileInfoKnown*(filename: string): bool =
+  var
+    canon: string
+  try:
+    canon = canonicalizePath(filename)
+  except:
+    canon = filename
+  result = filenameToIndexTbl.hasKey(canon)
 
 proc fileInfoIdx*(filename: string; isKnownFile: var bool): int32 =
   var
@@ -627,12 +631,17 @@ proc unknownLineInfo*(): TLineInfo =
   result.col = int16(-1)
   result.fileIndex = -1
 
+type
+  Severity* {.pure.} = enum ## VS Code only supports these three
+    Hint, Warning, Error
+
 var
   msgContext: seq[TLineInfo] = @[]
   lastError = unknownLineInfo()
 
   errorOutputs* = {eStdOut, eStdErr}
   writelnHook*: proc (output: string) {.closure.}
+  structuredErrorHook*: proc (info: TLineInfo; msg: string; severity: Severity) {.closure.}
 
 proc suggestWriteln*(s: string) =
   if eStdOut in errorOutputs:
@@ -676,9 +685,8 @@ proc getInfoContext*(index: int): TLineInfo =
   if i >=% L: result = unknownLineInfo()
   else: result = msgContext[i]
 
-proc toFilename*(fileIdx: int32): string =
-  if fileIdx < 0: result = "???"
-  else: result = fileInfos[fileIdx].projPath
+template toFilename*(fileIdx: int32): string =
+  (if fileIdx < 0: "???" else: fileInfos[fileIdx].projPath)
 
 proc toFullPath*(fileIdx: int32): string =
   if fileIdx < 0: result = "???"
@@ -742,6 +750,8 @@ proc msgWriteln*(s: string, flags: MsgFlags = {}) =
   ## is present, then it is used to output message rather than stderr/stdout.
   ## This behavior can be altered by given optional flags.
 
+  ## This is used for 'nim dump' etc. where we don't have nimsuggest
+  ## support.
   #if gCmd == cmdIdeTools and optCDebug notin gGlobalOptions: return
 
   if not isNil(writelnHook) and msgSkipHook notin flags:
@@ -818,6 +828,12 @@ proc getMessageStr(msg: TMsgKind, arg: string): string =
 type
   TErrorHandling = enum doNothing, doAbort, doRaise
 
+proc log*(s: string) {.procvar.} =
+  var f: File
+  if open(f, getHomeDir() / "nimsuggest.log", fmAppend):
+    f.writeLine(s)
+    close(f)
+
 proc quit(msg: TMsgKind) =
   if defined(debug) or msg == errInternal or hintStackTrace in gNotes:
     if stackTraceAvailable() and isNil(writelnHook):
@@ -827,12 +843,6 @@ proc quit(msg: TMsgKind) =
           "To create a stacktrace, rerun compilation with ./koch temp " &
           options.command & " <file>")
   quit 1
-
-proc log*(s: string) {.procvar.} =
-  var f: File
-  if open(f, "nimsuggest.log", fmAppend):
-    f.writeLine(s)
-    close(f)
 
 proc handleError(msg: TMsgKind, eh: TErrorHandling, s: string) =
   if msg >= fatalMin and msg <= fatalMax:
@@ -855,12 +865,16 @@ proc writeContext(lastinfo: TLineInfo) =
   var info = lastinfo
   for i in countup(0, len(msgContext) - 1):
     if msgContext[i] != lastinfo and msgContext[i] != info:
-      styledMsgWriteln(styleBright,
-                       PosFormat % [toMsgFilename(msgContext[i]),
-                                    coordToStr(msgContext[i].line),
-                                    coordToStr(msgContext[i].col+1)],
-                       resetStyle,
-                       getMessageStr(errInstantiationFrom, ""))
+      if structuredErrorHook != nil:
+        structuredErrorHook(msgContext[i], getMessageStr(errInstantiationFrom, ""),
+                            Severity.Error)
+      else:
+        styledMsgWriteln(styleBright,
+                         PosFormat % [toMsgFilename(msgContext[i]),
+                                      coordToStr(msgContext[i].line),
+                                      coordToStr(msgContext[i].col+1)],
+                         resetStyle,
+                         getMessageStr(errInstantiationFrom, ""))
     info = msgContext[i]
 
 proc ignoreMsgBecauseOfIdeTools(msg: TMsgKind): bool =
@@ -870,13 +884,16 @@ proc rawMessage*(msg: TMsgKind, args: openArray[string]) =
   var
     title: string
     color: ForegroundColor
-    kind:  string
+    kind: string
+    sev: Severity
   case msg
   of errMin..errMax:
+    sev = Severity.Error
     writeContext(unknownLineInfo())
     title = ErrorTitle
     color = ErrorColor
   of warnMin..warnMax:
+    sev = Severity.Warning
     if optWarns notin gOptions: return
     if msg notin gNotes: return
     writeContext(unknownLineInfo())
@@ -885,13 +902,18 @@ proc rawMessage*(msg: TMsgKind, args: openArray[string]) =
     kind = WarningsToStr[ord(msg) - ord(warnMin)]
     inc(gWarnCounter)
   of hintMin..hintMax:
+    sev = Severity.Hint
     if optHints notin gOptions: return
     if msg notin gNotes: return
     title = HintTitle
     color = HintColor
     kind = HintsToStr[ord(msg) - ord(hintMin)]
     inc(gHintCounter)
-  let s = `%`(msgKindToString(msg), args)
+  let s = msgKindToString(msg) % args
+
+  if structuredErrorHook != nil:
+    structuredErrorHook(unknownLineInfo(), s & (if kind != nil: KindFormat % kind else: ""), sev)
+
   if not ignoreMsgBecauseOfIdeTools(msg):
     if kind != nil:
       styledMsgWriteln(color, title, resetStyle, s,
@@ -929,8 +951,10 @@ proc liMessage(info: TLineInfo, msg: TMsgKind, arg: string,
     color: ForegroundColor
     kind:  string
     ignoreMsg = false
+    sev: Severity
   case msg
   of errMin..errMax:
+    sev = Severity.Error
     writeContext(info)
     title = ErrorTitle
     color = ErrorColor
@@ -939,6 +963,7 @@ proc liMessage(info: TLineInfo, msg: TMsgKind, arg: string,
     #ignoreMsg = lastError == info and eh != doAbort
     lastError = info
   of warnMin..warnMax:
+    sev = Severity.Warning
     ignoreMsg = optWarns notin gOptions or msg notin gNotes
     if not ignoreMsg: writeContext(info)
     title = WarningTitle
@@ -946,6 +971,7 @@ proc liMessage(info: TLineInfo, msg: TMsgKind, arg: string,
     kind = WarningsToStr[ord(msg) - ord(warnMin)]
     inc(gWarnCounter)
   of hintMin..hintMax:
+    sev = Severity.Hint
     ignoreMsg = optHints notin gOptions or msg notin gNotes
     title = HintTitle
     color = HintColor
@@ -957,14 +983,18 @@ proc liMessage(info: TLineInfo, msg: TMsgKind, arg: string,
   let x = PosFormat % [toMsgFilename(info), coordToStr(info.line),
                        coordToStr(info.col+1)]
   let s = getMessageStr(msg, arg)
-  if not ignoreMsg and not ignoreMsgBecauseOfIdeTools(msg):
-    if kind != nil:
-      styledMsgWriteln(styleBright, x, resetStyle, color, title, resetStyle, s,
-                       KindColor, `%`(KindFormat, kind))
-    else:
-      styledMsgWriteln(styleBright, x, resetStyle, color, title, resetStyle, s)
-    if msg in errMin..errMax and hintSource in gNotes:
-      info.writeSurroundingSrc
+
+  if not ignoreMsg:
+    if structuredErrorHook != nil:
+      structuredErrorHook(info, s & (if kind != nil: KindFormat % kind else: ""), sev)
+    if not ignoreMsgBecauseOfIdeTools(msg):
+      if kind != nil:
+        styledMsgWriteln(styleBright, x, resetStyle, color, title, resetStyle, s,
+                         KindColor, `%`(KindFormat, kind))
+      else:
+        styledMsgWriteln(styleBright, x, resetStyle, color, title, resetStyle, s)
+      if msg in errMin..errMax and hintSource in gNotes:
+        info.writeSurroundingSrc
   handleError(msg, eh, s)
 
 proc fatal*(info: TLineInfo, msg: TMsgKind, arg = "") =
@@ -989,12 +1019,12 @@ proc message*(info: TLineInfo, msg: TMsgKind, arg = "") =
   liMessage(info, msg, arg, doNothing)
 
 proc internalError*(info: TLineInfo, errMsg: string) =
-  if gCmd == cmdIdeTools: return
+  if gCmd == cmdIdeTools and structuredErrorHook.isNil: return
   writeContext(info)
   liMessage(info, errInternal, errMsg, doAbort)
 
 proc internalError*(errMsg: string) =
-  if gCmd == cmdIdeTools: return
+  if gCmd == cmdIdeTools and structuredErrorHook.isNil: return
   writeContext(unknownLineInfo())
   rawMessage(errInternal, errMsg)
 

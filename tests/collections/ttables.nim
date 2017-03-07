@@ -1,8 +1,9 @@
 discard """
+  cmd: "nim c --threads:on $file"
   output: '''true'''
 """
 
-import hashes, tables
+import hashes, tables, sharedtables
 
 const
   data = {
@@ -95,9 +96,24 @@ block orderedTableTest1:
   for key, val in mpairs(t): val = 99
   for val in mvalues(t): assert val == 99
 
+block orderedTableTest2:
+  var
+    s = initOrderedTable[string, int]()
+    t = initOrderedTable[string, int]()
+  assert s == t
+  for key, val in items(data): t[key] = val
+  assert s != t
+  for key, val in items(sorteddata): s[key] = val
+  assert s != t
+  t.clear()
+  assert s != t
+  for key, val in items(sorteddata): t[key] = val
+  assert s == t
+
 block countTableTest1:
   var s = data.toTable
   var t = initCountTable[string]()
+
   for k in s.keys: t.inc(k)
   for k in t.keys: assert t[k] == 1
   t.inc("90", 3)
@@ -114,6 +130,24 @@ block countTableTest1:
     of 2: assert k == "34" and v == 2
     else: break
     inc i
+
+block countTableTest2:
+  var
+    s = initCountTable[int]()
+    t = initCountTable[int]()
+  assert s == t
+  s.inc(1)
+  assert s != t
+  t.inc(2)
+  assert s != t
+  t.inc(1)
+  assert s != t
+  s.inc(2)
+  assert s == t
+  s.inc(1)
+  assert s != t
+  t.inc(1)
+  assert s == t
 
 block mpairsTableTest1:
   var t = initTable[string, int]()
@@ -134,28 +168,72 @@ block mpairsTableTest1:
 block SyntaxTest:
   var x = toTable[int, string]({:})
 
-# Until #4448 is fixed, these tests will fail
-when false:
-  block clearTableTest:
-    var t = data.toTable
-    assert t.len() != 0
-    t.clear()
-    assert t.len() == 0
+block zeroHashKeysTest:
+  proc doZeroHashValueTest[T, K, V](t: T, nullHashKey: K, value: V) =
+    let initialLen = t.len
+    var testTable = t
+    testTable[nullHashKey] = value
+    assert testTable[nullHashKey] == value
+    assert testTable.len == initialLen + 1
+    testTable.del(nullHashKey)
+    assert testTable.len == initialLen
 
-  block clearOrderedTableTest:
-    var t = data.toOrderedTable
-    assert t.len() != 0
-    t.clear()
-    assert t.len() == 0
+  # with empty table
+  doZeroHashValueTest(toTable[int,int]({:}), 0, 42)
+  doZeroHashValueTest(toTable[string,int]({:}), "", 23)
+  doZeroHashValueTest(toOrderedTable[int,int]({:}), 0, 42)
+  doZeroHashValueTest(toOrderedTable[string,int]({:}), "", 23)
 
-  block clearCountTableTest:
-    var t = initCountTable[string]()
-    t.inc("90", 3)
-    t.inc("12", 2)
-    t.inc("34", 1)
-    assert t.len() != 0
-    t.clear()
-    assert t.len() == 0
+  # with non-empty table
+  doZeroHashValueTest(toTable[int,int]({1:2}), 0, 42)
+  doZeroHashValueTest(toTable[string,string]({"foo": "bar"}), "", "zero")
+  doZeroHashValueTest(toOrderedTable[int,int]({3:4}), 0, 42)
+  doZeroHashValueTest(toOrderedTable[string,string]({"egg": "sausage"}),
+      "", "spam")
+
+block clearTableTest:
+  var t = data.toTable
+  assert t.len() != 0
+  t.clear()
+  assert t.len() == 0
+
+block clearOrderedTableTest:
+  var t = data.toOrderedTable
+  assert t.len() != 0
+  t.clear()
+  assert t.len() == 0
+
+block clearCountTableTest:
+  var t = initCountTable[string]()
+  t.inc("90", 3)
+  t.inc("12", 2)
+  t.inc("34", 1)
+  assert t.len() != 0
+  t.clear()
+  assert t.len() == 0
+
+block withKeyTest:
+  var t = initSharedTable[int, int]()
+  t.withKey(1) do (k: int, v: var int, pairExists: var bool):
+    assert(v == 0)
+    pairExists = true
+    v = 42
+  assert(t.mget(1) == 42)
+  t.withKey(1) do (k: int, v: var int, pairExists: var bool):
+    assert(v == 42)
+    pairExists = false
+  try:
+    discard t.mget(1)
+    assert(false, "KeyError expected")
+  except KeyError:
+    discard
+  t.withKey(2) do (k: int, v: var int, pairExists: var bool):
+    pairExists = false
+  try:
+    discard t.mget(2)
+    assert(false, "KeyError expected")
+  except KeyError:
+    discard
 
 proc orderedTableSortTest() =
   var t = initOrderedTable[string, int](2)

@@ -10,7 +10,7 @@
 # This module implements the renderer of the standard Nim representation.
 
 import
-  lexer, options, idents, strutils, ast, msgs, lists
+  lexer, options, idents, strutils, ast, msgs
 
 type
   TRenderFlag* = enum
@@ -53,8 +53,6 @@ proc isKeyword*(i: PIdent): bool =
   if (i.id >= ord(tokKeywordLow) - ord(tkSymbol)) and
       (i.id <= ord(tokKeywordHigh) - ord(tkSymbol)):
     result = true
-
-proc isKeyword*(s: string): bool = isKeyword(getIdent(s))
 
 proc renderDefinitionName*(s: PSym, noQuotes = false): string =
   ## Returns the definition name of the symbol.
@@ -289,8 +287,8 @@ proc lsub(n: PNode): int
 proc litAux(n: PNode, x: BiggestInt, size: int): string =
   proc skip(t: PType): PType =
     result = t
-    while result.kind in {tyGenericInst, tyRange, tyVar, tyDistinct, tyOrdinal,
-                          tyConst, tyMutable}:
+    while result.kind in {tyGenericInst, tyRange, tyVar, tyDistinct,
+                          tyOrdinal, tyAlias}:
       result = lastSon(result)
   if n.typ != nil and n.typ.skip.kind in {tyBool, tyEnum}:
     let enumfields = n.typ.skip.n
@@ -853,7 +851,11 @@ proc gsub(g: var TSrcGen, n: PNode, c: TContext) =
       put(g, tkRStrLit, '\"' & replace(n[1].strVal, "\"", "\"\"") & '\"')
     else:
       gsub(g, n.sons[1])
-  of nkHiddenStdConv, nkHiddenSubConv, nkHiddenCallConv: gsub(g, n.sons[1])
+  of nkHiddenStdConv, nkHiddenSubConv, nkHiddenCallConv:
+    if n.len >= 2:
+      gsub(g, n.sons[1])
+    else:
+      put(g, tkSymbol, "(wrong conv)")
   of nkCast:
     put(g, tkCast, "cast")
     put(g, tkBracketLe, "[")

@@ -1,11 +1,9 @@
-# use the official gcc image, based on debian
-# can use versions as well, like gcc:5.2
-# see https://hub.docker.com/_/gcc/
-image: gcc
+image: ubuntu:16.04
 
 stages:
   - pre-build
   - build
+  - deploy
   - test
 
 .linux_set_path: &linux_set_path_def
@@ -20,19 +18,6 @@ stages:
   tags:
     - windows
 
-build-linux:
-  stage: build
-  script:
-    - sh ci/build.sh
-  artifacts:
-    paths:
-      - bin/nim
-      - bin/nimd
-      - compiler/nim
-      - koch
-    expire_in: 1 week
-  tags:
-    - linux
 
 build-windows:
   stage: build
@@ -48,15 +33,20 @@ build-windows:
   tags:
     - windows
 
-test-linux:
-  stage: test
-  <<: *linux_set_path_def
+deploy-windows:
+  stage: deploy
   script:
-    - sh ci/deps.sh
-    - nim c --taintMode:on tests/testament/tester
-    - tests/testament/tester --pedantic all
+    - koch.exe winrelease
+  artifacts:
+    paths:
+      - build/*.exe
+      - build/*.zip
+    expire_in: 1 week
   tags:
-    - linux
+    - windows
+    - fast
+
+
 
 test-windows:
   stage: test
@@ -67,17 +57,5 @@ test-windows:
     - tests\testament\tester.exe --pedantic all
   tags:
     - windows
+    - fast
 
-.csources: &csources_definition
-  stage: test
-  script:
-    - nim -v
-    - ./koch csources
-    - ./koch xz
-  artifacts:
-    paths:
-      - csources
-
-csources-linux:
-  <<: *csources_definition
-  <<: *linux_set_path_def

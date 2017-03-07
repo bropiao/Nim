@@ -13,6 +13,8 @@
 import
   os, options, ast, astalgo, msgs, ropes, idents, passes, docgen
 
+from modulegraphs import ModuleGraph
+
 type
   TGen = object of TPassContext
     doc: PDoc
@@ -31,11 +33,11 @@ template closeImpl(body: untyped) {.dirty.} =
     except IOError:
       discard
 
-proc close(p: PPassContext, n: PNode): PNode =
+proc close(graph: ModuleGraph; p: PPassContext, n: PNode): PNode =
   closeImpl:
     writeOutput(g.doc, g.module.filename, HtmlExt, useWarning)
 
-proc closeJson(p: PPassContext, n: PNode): PNode =
+proc closeJson(graph: ModuleGraph; p: PPassContext, n: PNode): PNode =
   closeImpl:
     writeOutputJson(g.doc, g.module.filename, ".json", useWarning)
 
@@ -49,7 +51,7 @@ proc processNodeJson(c: PPassContext, n: PNode): PNode =
   var g = PGen(c)
   generateJson(g.doc, n)
 
-proc myOpen(module: PSym): PPassContext =
+proc myOpen(graph: ModuleGraph; module: PSym; cache: IdentCache): PPassContext =
   var g: PGen
   new(g)
   g.module = module

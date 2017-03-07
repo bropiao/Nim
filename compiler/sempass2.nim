@@ -59,7 +59,7 @@ type
     init: seq[int] # list of initialized variables
     guards: TModel # nested guards
     locked: seq[PNode] # locked locations
-    gcUnsafe, isRecursive, isToplevel, hasSideEffect: bool
+    gcUnsafe, isRecursive, isToplevel, hasSideEffect, inEnforcedGcSafe: bool
     maxLockLevel, currLockLevel: TLockLevel
   PEffects = var TEffects
 
@@ -131,7 +131,7 @@ proc guardDotAccess(a: PEffects; n: PNode) =
         if field != nil: break
         ty = ty.sons[0]
         if ty == nil: break
-        ty = ty.skipTypes(abstractPtrs)
+        ty = ty.skipTypes(skipPtrs)
     if field == nil:
       localError(n.info, errGenerated, "invalid guard field: " & g.name.s)
       return
@@ -180,17 +180,19 @@ proc warnAboutGcUnsafe(n: PNode) =
   message(n.info, warnGcUnsafe, renderTree(n))
 
 proc markGcUnsafe(a: PEffects; reason: PSym) =
-  a.gcUnsafe = true
-  if a.owner.kind in routineKinds: a.owner.gcUnsafetyReason = reason
+  if not a.inEnforcedGcSafe:
+    a.gcUnsafe = true
+    if a.owner.kind in routineKinds: a.owner.gcUnsafetyReason = reason
 
 proc markGcUnsafe(a: PEffects; reason: PNode) =
-  a.gcUnsafe = true
-  if a.owner.kind in routineKinds:
-    if reason.kind == nkSym:
-      a.owner.gcUnsafetyReason = reason.sym
-    else:
-      a.owner.gcUnsafetyReason = newSym(skUnknown, getIdent("<unknown>"),
-                                        a.owner, reason.info)
+  if not a.inEnforcedGcSafe:
+    a.gcUnsafe = true
+    if a.owner.kind in routineKinds:
+      if reason.kind == nkSym:
+        a.owner.gcUnsafetyReason = reason.sym
+      else:
+        a.owner.gcUnsafetyReason = newSym(skUnknown, getIdent("<unknown>"),
+                                          a.owner, reason.info)
 
 when true:
   template markSideEffect(a: PEffects; reason: typed) =
@@ -204,16 +206,21 @@ proc listGcUnsafety(s: PSym; onlyWarning: bool; cycleCheck: var IntSet) =
   let u = s.gcUnsafetyReason
   if u != nil and not cycleCheck.containsOrIncl(u.id):
     let msgKind = if onlyWarning: warnGcUnsafe2 else: errGenerated
-    if u.kind in {skLet, skVar}:
+    case u.kind
+    of skLet, skVar:
       message(s.info, msgKind,
         ("'$#' is not GC-safe as it accesses '$#'" &
         " which is a global using GC'ed memory") % [s.name.s, u.name.s])
-    elif u.kind in routineKinds:
+    of routineKinds:
       # recursive call *always* produces only a warning so the full error
       # message is printed:
       listGcUnsafety(u, true, cycleCheck)
       message(s.info, msgKind,
         "'$#' is not GC-safe as it calls '$#'" %
+        [s.name.s, u.name.s])
+    of skParam:
+      message(s.info, msgKind,
+        "'$#' is not GC-safe as it performs an indirect call via '$#'" %
         [s.name.s, u.name.s])
     else:
       internalAssert u.kind == skUnknown
@@ -721,7 +728,8 @@ proc track(tracked: PEffects, n: PNode) =
           # and it's not a recursive call:
           if not (a.kind == nkSym and a.sym == tracked.owner):
             markSideEffect(tracked, a)
-    for i in 1 .. <len(n): trackOperand(tracked, n.sons[i], paramType(op, i))
+    if a.kind != nkSym or a.sym.magic != mNBindSym:
+      for i in 1 .. <len(n): trackOperand(tracked, n.sons[i], paramType(op, i))
     if a.kind == nkSym and a.sym.magic in {mNew, mNewFinalize, mNewSeq}:
       # may not look like an assignment, but it is:
       let arg = n.sons[1]
@@ -797,10 +805,16 @@ proc track(tracked: PEffects, n: PNode) =
     let pragmaList = n.sons[0]
     let oldLocked = tracked.locked.len
     let oldLockLevel = tracked.currLockLevel
+    var enforcedGcSafety = false
     for i in 0 .. <pragmaList.len:
-      if whichPragma(pragmaList.sons[i]) == wLocks:
+      let pragma = whichPragma(pragmaList.sons[i])
+      if pragma == wLocks:
         lockLocations(tracked, pragmaList.sons[i])
+      elif pragma == wGcSafe:
+        enforcedGcSafety = true
+    if enforcedGcSafety: tracked.inEnforcedGcSafe = true
     track(tracked, n.lastSon)
+    if enforcedGcSafety: tracked.inEnforcedGcSafe = false
     setLen(tracked.locked, oldLocked)
     tracked.currLockLevel = oldLockLevel
   of nkTypeSection, nkProcDef, nkConverterDef, nkMethodDef, nkIteratorDef,

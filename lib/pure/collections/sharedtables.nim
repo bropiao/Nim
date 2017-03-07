@@ -15,6 +15,8 @@
 import
   hashes, math, locks
 
+include "system/inclrtl"
+
 type
   KeyValuePair[A, B] = tuple[hcode: Hash, key: A, val: B]
   KeyValuePairSeq[A, B] = ptr array[10_000_000, KeyValuePair[A, B]]
@@ -35,9 +37,12 @@ proc enlarge[A, B](t: var SharedTable[A, B]) =
   t.dataLen = size
   swap(t.data, n)
   for i in 0..<oldSize:
-    if isFilled(n[i].hcode):
-      var j = -1 - rawGetKnownHC(t, n[i].key, n[i].hcode)
-      rawInsert(t, t.data, n[i].key, n[i].val, n[i].hcode, j)
+    let eh = n[i].hcode
+    if isFilled(eh):
+      var j: Hash = eh and maxHash(t)
+      while isFilled(t.data[j].hcode):
+        j = nextTry(j, maxHash(t))
+      rawInsert(t, t.data, n[i].key, n[i].val, eh, j)
   deallocShared(n)
 
 template withLock(t, x: untyped) =
@@ -47,7 +52,7 @@ template withLock(t, x: untyped) =
 
 template withValue*[A, B](t: var SharedTable[A, B], key: A,
                           value, body: untyped) =
-  ## retrieves the value at ``t[key]``. 
+  ## retrieves the value at ``t[key]``.
   ## `value` can be modified in the scope of the ``withValue`` call.
   ##
   ## .. code-block:: nim
@@ -55,7 +60,7 @@ template withValue*[A, B](t: var SharedTable[A, B], key: A,
   ##   sharedTable.withValue(key, value) do:
   ##     # block is executed only if ``key`` in ``t``
   ##     # value is threadsafe in block
-  ##     value.name = "username" 
+  ##     value.name = "username"
   ##     value.uid = 1000
   ##
   acquire(t.lock)
@@ -71,15 +76,15 @@ template withValue*[A, B](t: var SharedTable[A, B], key: A,
 
 template withValue*[A, B](t: var SharedTable[A, B], key: A,
                           value, body1, body2: untyped) =
-  ## retrieves the value at ``t[key]``. 
+  ## retrieves the value at ``t[key]``.
   ## `value` can be modified in the scope of the ``withValue`` call.
-  ## 
+  ##
   ## .. code-block:: nim
   ##
   ##   sharedTable.withValue(key, value) do:
   ##     # block is executed only if ``key`` in ``t``
   ##     # value is threadsafe in block
-  ##     value.name = "username" 
+  ##     value.name = "username"
   ##     value.uid = 1000
   ##   do:
   ##     # block is executed when ``key`` not in ``t``
@@ -124,6 +129,52 @@ proc hasKeyOrPut*[A, B](t: var SharedTable[A, B], key: A, val: B): bool =
   ## returns true iff `key` is in the table, otherwise inserts `value`.
   withLock t:
     hasKeyOrPutImpl(enlarge)
+
+proc withKey*[A, B](t: var SharedTable[A, B], key: A,
+                    mapper: proc(key: A, val: var B, pairExists: var bool)) =
+  ## Computes a new mapping for the ``key`` with the specified ``mapper``
+  ## procedure.
+  ##
+  ## The ``mapper`` takes 3 arguments:
+  ##   #. ``key`` - the current key, if it exists, or the key passed to
+  ##      ``withKey`` otherwise;
+  ##   #. ``val`` - the current value, if the key exists, or default value
+  ##      of the type otherwise;
+  ##   #. ``pairExists`` - ``true`` if the key exists, ``false`` otherwise.
+  ## The ``mapper`` can can modify ``val`` and ``pairExists`` values to change
+  ## the mapping of the key or delete it from the table.
+  ## When adding a value, make sure to set ``pairExists`` to ``true`` along
+  ## with modifying the ``val``.
+  ##
+  ## The operation is performed atomically and other operations on the table
+  ## will be blocked while the ``mapper`` is invoked, so it should be short and
+  ## simple.
+  ##
+  ## Example usage:
+  ##
+  ## .. code-block:: nim
+  ##
+  ##   # If value exists, decrement it.
+  ##   # If it becomes zero or less, delete the key
+  ##   t.withKey(1'i64) do (k: int64, v: var int, pairExists: var bool):
+  ##     if pairExists:
+  ##       dec v
+  ##       if v <= 0:
+  ##         pairExists = false
+  withLock t:
+    var hc: Hash
+    var index = rawGet(t, key, hc)
+
+    var pairExists = index >= 0
+    if pairExists:
+      mapper(t.data[index].key, t.data[index].val, pairExists)
+      if not pairExists:
+        delImplIdx(t, index)
+    else:
+      var val: B
+      mapper(key, val, pairExists)
+      if pairExists:
+        maybeRehashPutImpl(enlarge)
 
 proc `[]=`*[A, B](t: var SharedTable[A, B], key: A, val: B) =
   ## puts a (key, value)-pair into `t`.

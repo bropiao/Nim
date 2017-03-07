@@ -15,9 +15,6 @@
 
 # XXX Ensure by smart color masking that the object is not in the ZCT.
 
-when defined(nimCoroutines):
-  import arch
-
 {.push profiler:off.}
 
 const
@@ -32,6 +29,9 @@ when withRealTime and not declared(getTicks):
   include "system/timers"
 when defined(memProfiler):
   proc nimProfile(requestedSize: int) {.benign.}
+
+when hasThreadSupport:
+  include sharedlist
 
 type
   ObjectSpaceIter = object
@@ -69,19 +69,26 @@ type
     maxStackCells: int       # max stack cells in ``decStack``
     cycleTableSize: int      # max entries in cycle table
     maxPause: int64          # max measured GC pause in nanoseconds
+  
+  GcStack {.final, pure.} = object
+    when nimCoroutines:
+      prev: ptr GcStack
+      next: ptr GcStack
+      maxStackSize: int      # Used to track statistics because we can not use
+                             # GcStat.maxStackSize when multiple stacks exist.
+    bottom: pointer
 
-  GcStack = object
-    prev: ptr GcStack
-    next: ptr GcStack
-    starts: pointer
-    pos: pointer
-    maxStackSize: int
+    when withRealTime or nimCoroutines:
+      pos: pointer           # Used with `withRealTime` only for code clarity, see GC_Step().
+    when withRealTime:
+      bottomSaved: pointer
 
   GcHeap = object # this contains the zero count and
                   # non-zero count table
     black, red: int # either 0 or 1.
-    stack: ptr GcStack
-    stackBottom: pointer
+    stack: GcStack
+    when nimCoroutines:
+      activeStack: ptr GcStack    # current executing coroutine stack.
     phase: Phase
     cycleThreshold: int
     when useCellIds:
@@ -96,7 +103,7 @@ type
     stat: GcStat
     additionalRoots: CellSeq # dummy roots for GC_ref/unref
     spaceIter: ObjectSpaceIter
-    dumpHeapFile: File # File that is used for GC_dumpHeap
+    pDumpHeapFile: pointer # File that is used for GC_dumpHeap
     when hasThreadSupport:
       toDispose: SharedList[pointer]
 
@@ -612,6 +619,9 @@ template checkTime {.dirty.} =
 
 # ---------------- dump heap ----------------
 
+template dumpHeapFile(gch: var GcHeap): File =
+  cast[File](gch.pDumpHeapFile)
+
 proc debugGraph(s: PCell) =
   c_fprintf(gch.dumpHeapFile, "child %p\n", s)
 
@@ -625,7 +635,7 @@ proc GC_dumpHeap*(file: File) =
   ## Dumps the GCed heap's content to a file. Can be useful for
   ## debugging. Produces an undocumented text file format that
   ## can be translated into "dot" syntax via the "heapdump2dot" tool.
-  gch.dumpHeapFile = file
+  gch.pDumpHeapFile = file
   var spaceIter: ObjectSpaceIter
   var d = gch.decStack.d
   for i in 0 .. < gch.decStack.len:
@@ -643,7 +653,7 @@ proc GC_dumpHeap*(file: File) =
       writeCell(file, "cell ", c)
       forAllChildren(c, waDebug)
       c_fprintf(file, "end\n")
-  gch.dumpHeapFile = nil
+  gch.pDumpHeapFile = nil
 
 proc GC_dumpHeap() =
   var f: File
@@ -907,7 +917,7 @@ proc collectCTBody(gch: var GcHeap) =
     let t0 = getticks()
   sysAssert(allocInv(gch.region), "collectCT: begin")
 
-  when not defined(nimCoroutines):
+  when not nimCoroutines:
     gch.stat.maxStackSize = max(gch.stat.maxStackSize, stackSize())
   sysAssert(gch.decStack.len == 0, "collectCT")
   prepareForInteriorPointerChecking(gch.region)
@@ -932,16 +942,16 @@ proc collectCTBody(gch: var GcHeap) =
       if gch.maxPause > 0 and duration > gch.maxPause:
         c_fprintf(stdout, "[GC] missed deadline: %ld\n", duration)
 
-when defined(nimCoroutines):
+when nimCoroutines:
   proc currentStackSizes(): int =
     for stack in items(gch.stack):
-      result = result + stackSize(stack.starts, stack.pos)
+      result = result + stack.stackSize()
 
 proc collectCT(gch: var GcHeap) =
   # stackMarkCosts prevents some pathological behaviour: Stack marking
   # becomes more expensive with large stacks and large stacks mean that
   # cells with RC=0 are more likely to be kept alive by the stack.
-  when defined(nimCoroutines):
+  when nimCoroutines:
     let stackMarkCosts = max(currentStackSizes() div (16*sizeof(int)), ZctThreshold)
   else:
     let stackMarkCosts = max(stackSize() div (16*sizeof(int)), ZctThreshold)
@@ -965,18 +975,24 @@ when withRealTime:
       collectCTBody(gch)
 
   proc GC_step*(us: int, strongAdvice = false, stackSize = -1) {.noinline.} =
-    var stackTop {.volatile.}: pointer
-    let prevStackBottom = gch.stackBottom
     if stackSize >= 0:
-      stackTop = addr(stackTop)
-      when stackIncreases:
-        gch.stackBottom = cast[pointer](
-          cast[ByteAddress](stackTop) - sizeof(pointer) * 6 - stackSize)
-      else:
-        gch.stackBottom = cast[pointer](
-          cast[ByteAddress](stackTop) + sizeof(pointer) * 6 + stackSize)
+      var stackTop {.volatile.}: pointer
+      gch.getActiveStack().pos = addr(stackTop)
+
+      for stack in gch.stack.items():
+        stack.bottomSaved = stack.bottom
+        when stackIncreases:
+          stack.bottom = cast[pointer](
+            cast[ByteAddress](stack.pos) - sizeof(pointer) * 6 - stackSize)
+        else:
+          stack.bottom = cast[pointer](
+            cast[ByteAddress](stack.pos) + sizeof(pointer) * 6 + stackSize)
+
     GC_step(gch, us, strongAdvice)
-    gch.stackBottom = prevStackBottom
+
+    if stackSize >= 0:
+      for stack in gch.stack.items():
+        stack.bottom = stack.bottomSaved
 
 when not defined(useNimRtl):
   proc GC_disable() =
@@ -1018,10 +1034,10 @@ when not defined(useNimRtl):
              "[GC] zct capacity: " & $gch.zct.cap & "\n" &
              "[GC] max cycle table size: " & $gch.stat.cycleTableSize & "\n" &
              "[GC] max pause time [ms]: " & $(gch.stat.maxPause div 1000_000)
-    when defined(nimCoroutines):
+    when nimCoroutines:
       result = result & "[GC] number of stacks: " & $gch.stack.len & "\n"
       for stack in items(gch.stack):
-        result = result & "[GC]   stack " & stack.starts.repr & "[GC]     max stack size " & $stack.maxStackSize & "\n"
+        result = result & "[GC]   stack " & stack.bottom.repr & "[GC]     max stack size " & $stack.maxStackSize & "\n"
     else:
       result = result & "[GC] max stack size: " & $gch.stat.maxStackSize & "\n"
     GC_enable()

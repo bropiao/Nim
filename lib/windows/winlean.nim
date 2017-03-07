@@ -337,11 +337,10 @@ when useWinUnicode:
       stdcall, dynlib: "kernel32", importc: "SetFileAttributesW".}
 
   proc copyFileW*(lpExistingFileName, lpNewFileName: WideCString,
-                 bFailIfExists: cint): cint {.
+                 bFailIfExists: WINBOOL): WINBOOL {.
     importc: "CopyFileW", stdcall, dynlib: "kernel32".}
 
-  proc moveFileW*(lpExistingFileName, lpNewFileName: WideCString,
-                 bFailIfExists: cint): cint {.
+  proc moveFileW*(lpExistingFileName, lpNewFileName: WideCString): WINBOOL {.
     importc: "MoveFileW", stdcall, dynlib: "kernel32".}
 
   proc getEnvironmentStringsW*(): WideCString {.
@@ -368,8 +367,7 @@ else:
                  bFailIfExists: cint): cint {.
     importc: "CopyFileA", stdcall, dynlib: "kernel32".}
 
-  proc moveFileA*(lpExistingFileName, lpNewFileName: cstring,
-                 bFailIfExists: cint): cint {.
+  proc moveFileA*(lpExistingFileName, lpNewFileName: cstring): WINBOOL {.
     importc: "MoveFileA", stdcall, dynlib: "kernel32".}
 
   proc getEnvironmentStringsA*(): cstring {.
@@ -421,9 +419,6 @@ const
 
   ws2dll = "Ws2_32.dll"
 
-  WSAEWOULDBLOCK* = 10035
-  WSAEINPROGRESS* = 10036
-
 proc wsaGetLastError*(): cint {.importc: "WSAGetLastError", dynlib: ws2dll.}
 
 type
@@ -440,7 +435,7 @@ type
 
   SockAddr* {.importc: "SOCKADDR", header: "winsock2.h".} = object
     sa_family*: int16 # unsigned
-    sa_data: array[0..13, char]
+    sa_data*: array[0..13, char]
 
   PSockAddr = ptr SockAddr
 
@@ -546,6 +541,9 @@ proc gethostbyaddr*(ip: ptr InAddr, len: cuint, theType: cint): ptr Hostent {.
 
 proc gethostbyname*(name: cstring): ptr Hostent {.
   stdcall, importc: "gethostbyname", dynlib: ws2dll.}
+
+proc gethostname*(hostname: cstring, len: cint): cint {.
+  stdcall, importc: "gethostname", dynlib: ws2dll.}
 
 proc socket*(af, typ, protocol: cint): SocketHandle {.
   stdcall, importc: "socket", dynlib: ws2dll.}
@@ -762,6 +760,11 @@ const
   WSAEDISCON* = 10101
   WSAENETRESET* = 10052
   WSAETIMEDOUT* = 10060
+  WSANOTINITIALISED* = 10093
+  WSAENOTSOCK* = 10038
+  WSAEINPROGRESS* = 10036
+  WSAEINTR* = 10004
+  WSAEWOULDBLOCK* = 10035
   ERROR_NETNAME_DELETED* = 64
   STATUS_PENDING* = 0x103
 
@@ -792,7 +795,7 @@ const
  IOC_WS2* = 0x08000000
  IOC_INOUT* = IOC_IN or IOC_OUT
 
-template WSAIORW*(x,y): expr = (IOC_INOUT or x or y)
+template WSAIORW*(x,y): untyped = (IOC_INOUT or x or y)
 
 const
   SIO_GET_EXTENSION_FUNCTION_POINTER* = WSAIORW(IOC_WS2,6).DWORD
@@ -854,7 +857,7 @@ proc getProcessTimes*(hProcess: Handle; lpCreationTime, lpExitTime,
   dynlib: "kernel32", importc: "GetProcessTimes".}
 
 type inet_ntop_proc = proc(family: cint, paddr: pointer, pStringBuffer: cstring,
-                      stringBufSize: int32): cstring {.stdcall.}
+                      stringBufSize: int32): cstring {.gcsafe, stdcall.}
 
 var inet_ntop_real: inet_ntop_proc = nil
 
@@ -1036,3 +1039,17 @@ else:
   proc readConsoleInput*(hConsoleInput: Handle, lpBuffer: pointer, nLength: cint,
                         lpNumberOfEventsRead: ptr cint): cint
        {.stdcall, dynlib: "kernel32", importc: "ReadConsoleInputW".}
+
+type
+  LPFIBER_START_ROUTINE* = proc (param: pointer): void {.stdcall.}
+
+const
+  FIBER_FLAG_FLOAT_SWITCH* = 0x01
+
+proc CreateFiber*(stackSize: int, fn: LPFIBER_START_ROUTINE, param: pointer): pointer {.stdcall, discardable, dynlib: "kernel32", importc.}
+proc CreateFiberEx*(stkCommit: int, stkReserve: int, flags: int32, fn: LPFIBER_START_ROUTINE, param: pointer): pointer {.stdcall, discardable, dynlib: "kernel32", importc.}
+proc ConvertThreadToFiber*(param: pointer): pointer {.stdcall, discardable, dynlib: "kernel32", importc.}
+proc ConvertThreadToFiberEx*(param: pointer, flags: int32): pointer {.stdcall, discardable, dynlib: "kernel32", importc.}
+proc DeleteFiber*(fiber: pointer): void {.stdcall, discardable, dynlib: "kernel32", importc.}
+proc SwitchToFiber*(fiber: pointer): void {.stdcall, discardable, dynlib: "kernel32", importc.}
+proc GetCurrentFiber*(): pointer {.stdcall, importc, header: "Windows.h".}
